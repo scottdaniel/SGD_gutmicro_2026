@@ -1,0 +1,19 @@
+"The number of entries per field is limited to 10 for this overview. If you want the whole information you can use the API or the ""Download selection"" menu on the Webpage."
+
+ID,designation_header,strain_number_header,is_type_strain_header,species,"Metabolite (production)",Production
+99,,"DSM 21505, CCUG 50930, CIP 108586, KCTC 15229, ADV 255.99, AIP 283.01",1,"Acidaminococcus intestini",butyrate,1
+132618,SR79,"DSM 100391, KCTC 15532, JCM 30795",1,"Agathobaculum butyriciproducens",butyrate,1
+140747,SH021,"JCM 31556, DSM 103575, KCTC 15705",1,"Anaerotignum aminivorans",butyrate,1
+2806,G17,"DSM 14214, LMG 20954",1,"Anaerotignum lactatifermentans",butyrate,1
+2765,X4,"DSM 3847, KCTC 15564",1,"Anaerotignum neopropionicum",butyrate,1
+2646,X2,"DSM 1682, ATCC 25522, NCIMB 10656, CCUG 9280, JCM 1430, VPI 5303",1,"Anaerotignum propionicum",butyrate,1
+17679,277,"DSM 17241, CCUG 45055, CIP 107754, WAL 14565, JCM 15631, VTT E-062942",1,"Anaerotruncus colihominis",butyrate,1
+158361,BB10,"DSM 104997, ATCC TSD-102",1,"Butyricicoccus porcorum",butyrate,1
+133154,180-3,"DSM 105721, CCUG 65562, JCM 18676",1,"Butyricimonas faecihominis",butyrate,1
+2817,P7,"DSM 15243, ATCC BAA-624, KCTC 15178",1,"Clostridium carboxidivorans",butyrate,1
+2568,743B,"DSM 3052, ATCC 35296, OCM 3",1,"Clostridium cellulovorans",butyrate,1
+2836,SL1,"DSM 12750, ATCC BAA-623",1,"Clostridium drakei",butyrate,1
+140317,,"DSM 104389, NRRL B-65463, IEH 97212",1,"Clostridium tepidum",butyrate,1
+159457,WCA-MUC-591-APC-3H,"DSM 104962, JCM 34390",1,"Hornefia butyriciproducens",butyrate,1
+133070,KNHs209,"DSM 100556, ATCC TSD-26",1,"Kineothrix alysoides",butyrate,1
+5452,DO-4,"DSM 3980, ATCC 23263, CCUG 52346, CIP 107831, JCM 6480, VPI 0416, KCTC 15024",1,"Pseudoramibacter alactolyticus",butyrate,1

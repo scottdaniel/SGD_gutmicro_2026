@@ -1,0 +1,955 @@
+---
+title: |
+  ![](CHOPMC_logo.pdf){width=5in}  
+  "Sagori - baby growth analysis - metabolomics"
+author: "Scott G. Daniel, Ph.D."
+date: \today
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r knitr setup, echo=FALSE, message=FALSE}
+library(knitr)
+opts_chunk$set(
+  tidy=FALSE,
+  cache=FALSE,
+  echo=FALSE,
+  warning=FALSE,
+  message=FALSE,
+  dpi=100,
+  fig.width=6,
+  fig.height=6,
+  fig.align = "center",
+  fig_crop=FALSE
+  )
+```
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(here)
+library(ggbeeswarm)
+library(grid)
+library(magrittr)
+library(pander)
+library(pheatmap)
+library(usedist)
+library(qiimer)
+library(reshape2)
+library(jsonlite)
+library(vegan)
+library(ape)
+library(tidyverse)
+library(gghighlight)
+library(RColorBrewer)
+library(patchwork)
+library(kylemisc)
+library(ggpubr)
+library(GGally)
+library(lme4)
+# library(tsne)
+library(Rtsne)
+
+library(glue)
+library(kableExtra)
+
+library(pheatbuilder)
+library(ppcor)
+library(scales)
+library(ghibli)
+library(viridis)
+library(qualpalr)
+library(ggVennDiagram)
+
+panderOptions("knitr.auto.asis", FALSE)
+#this also means that you have to put results='asis' in any block that has pander output
+#this lets you loop through variables and produce multiple pander tables and ggplots in a
+#single code block!
+
+select <- dplyr::select
+
+```
+
+```{r functions}
+
+source(here::here("Scripts","Functions","common_functions.R"))
+source(here::here("Scripts","Functions","for_functional_analysis.R"))
+source(here::here("Scripts","Functions","scott_daniel_useful_R_functions.R"))
+
+```
+
+```{r load data and set colors}
+
+load(file = here("Data", "after_gene_abundance_analysis.RData"))
+
+s_toPlot <- s_toTest <- s2
+
+ann_colors = list(
+  category = setNames(brewer.pal(length(levels(s_toTest$category)), "Set2"), levels(s_toTest$category)),
+  growth_cat = setNames(as.character(ghibli_palette("YesterdayMedium", direction = -1)[1:length(levels(s_toTest$growth_cat))]), levels(s_toTest$growth_cat)),
+  TimePoint = setNames(viridis(length(levels(s_toTest$TimePoint))), levels(s_toTest$TimePoint)),
+  growth_fail = setNames(qualpal(2)$hex, levels(s_toTest$growth_failure))
+)
+
+table_iterator <- function() {
+  table_count <- 0
+  function(x, title = "table_export", ...) {
+    table_count <<- table_count + 1
+    table_name <- paste0(title, table_count, ".csv")
+    table_path <- here("Output", table_name)
+    write_csv(x = x, file = table_path, ...)
+    print(paste0("Full table is saved as ", table_name, "."))
+  }
+}
+
+table_export <- table_iterator()
+
+```
+
+# START
+
+# Metabolomics - Stool
+
+```{r message=FALSE, warning=FALSE}
+
+#Stool metabolites in micromolars per gram (umol/g)
+
+stool_metab_raw <- read_csv(here("Data","stool_metab.csv")) %>%
+  rename(nmr_no = `NMR No.`) %>%
+  select(-stool_date, -box, -location, -barcode_tube) %>%
+  mutate(redcap_id = as.character(redcap_id))
+
+stool_metab_mapping <- read_csv(here("Data", "stool_metab_mapping.csv")) %>%
+  select(SampleID = SampleID_seq, nmr_no = `NMR No.`, Seq_run5_YN,	Inf_metBol_mlk,	DOL,	HOL,	in_36wklist)
+
+stool_metab <- stool_metab_raw %>%
+  inner_join(stool_metab_mapping, by = "nmr_no") %>%
+  select(SampleID, everything()) %>%
+  mutate(Sequenced = ifelse(SampleID %in% "Not seq", F, T)) %>%
+  mutate(SampleID = ifelse(SampleID %in% "Not seq", paste0("inf", redcap_id, "nmr_no", nmr_no), SampleID))
+
+```
+
+## Total samples w/ microbiome and metabolite data
+
+```{r}
+
+x = list(
+  Microbiota = unique(c(stool_metab %>% filter(Sequenced) %>% pull(SampleID), s_toTest$SampleID)),
+  Metabolites = stool_metab$SampleID
+)
+
+ggVennDiagram(x) +
+  scale_fill_gradient(low="blue",high = "orange") +
+  scale_x_continuous(expand = expansion(mult = .2))
+
+```
+
+## Total babies w/ microbiome and/or metabolite data
+
+```{r}
+
+x = list(
+  Microbiota = unique(c(stool_metab %>% filter(Sequenced) %>% pull(redcap_id), s_toTest$redcap_id)),
+  Metabolites = unique(stool_metab$redcap_id)
+)
+
+ggVennDiagram(x) +
+  scale_fill_gradient(low="blue",high = "orange") +
+  scale_x_continuous(expand = expansion(mult = .2))
+
+```
+
+
+## Overview plots
+
+### Histograms of metabolites
+
+```{r, fig.width=10, fig.height=7}
+
+metab_names <- stool_metab_raw %>%
+  select(4:length(colnames(stool_metab_raw))) %>%
+  colnames()
+
+stool_metab_long <- stool_metab %>%
+  pivot_longer(cols = all_of(metab_names), names_to = "metab", values_to = "umol_g", values_drop_na = T) %>%
+  droplevels()
+
+max_num <- max(stool_metab_long$umol_g)
+
+stool_metab_long %<>%
+  group_by(metab) %>%
+  mutate(metab_min = ifelse(umol_g == 0, max_num, umol_g)) %>%
+  mutate(umol_g = ifelse(umol_g == 0, min(metab_min)/2, umol_g)) %>%
+  ungroup()
+
+number_of_blocks <- ceiling(length(metab_names) / 9)
+my_blocks <- chunk_it(metab_names, number_of_blocks)
+
+for (i in 1:number_of_blocks) {
+  subset <- my_blocks[[i]]
+  
+  g <- stool_metab_long %>%
+    filter(metab %in% subset) %>%
+    ggplot(aes(umol_g)) +
+    geom_histogram() +
+    facet_wrap(~metab, scales="free")
+  
+  plot(g)
+  
+}
+
+```
+
+### Samples by growth category
+
+Zeros were replaced with 1/2 the minimum value per metabolite.
+
+```{r, fig.width=10, fig.height=7}
+
+metab_to_Plot <- stool_metab_long %>%
+  inner_join(s_toPlot %>% select(SampleID, growth_cat, growth_failure, TimePoint, SubjectID), by = "SampleID") %>% 
+  droplevels()
+
+for (i in 1:number_of_blocks) {
+  subset <- my_blocks[[i]]
+  
+  g <- metab_to_Plot %>%
+    filter(!is.na(growth_cat), metab %in% subset) %>%
+    ggplot(aes(x=growth_cat, y=umol_g, color=TimePoint)) +
+    geom_quasirandom(dodge.width = 0.75, groupOnX = T) +
+    theme_bw() +
+    facet_wrap(~metab, scales="free_y") +
+    theme(
+      axis.text.x=element_text(angle=45, hjust=1, vjust=1),
+      panel.grid = element_blank(),
+      strip.background = element_blank(),
+      legend.position = "bottom"
+    ) +
+    scale_color_manual(values = ann_colors$TimePoint) +
+    scale_y_continuous(trans = "log10") +
+    labs(
+      x="Growth category", color="Timepoint",
+      y="Concentration (umol/g)"
+    )
+  
+  plot(g)
+  
+}
+    
+```
+
+### Samples by growth failure
+
+```{r, fig.width=10, fig.height=7}
+
+for (i in 1:number_of_blocks) {
+  subset <- my_blocks[[i]]
+  
+  g <- metab_to_Plot %>%
+    filter(!is.na(growth_failure), metab %in% subset) %>%
+    ggplot(aes(x=growth_failure, y=umol_g, color=TimePoint)) +
+    geom_quasirandom(dodge.width = 0.75, groupOnX = T) +
+    theme_bw() +
+    facet_wrap(~metab, scales="free_y") +
+    theme(
+      axis.text.x=element_text(angle=45, hjust=1, vjust=1),
+      panel.grid = element_blank(),
+      strip.background = element_blank(),
+      legend.position = "bottom"
+    ) +
+    scale_color_manual(values = ann_colors$TimePoint) +
+    scale_y_continuous(trans = "log10") +
+    labs(
+      x="Growth failure", color="Timepoint",
+      y="Concentration (umol/g)"
+    )
+  
+  plot(g)
+  
+}
+
+```
+
+## Linear models for growth categories
+
+Are there any significant differences between growth categories? We will log10 transform the values since they do not appear normally distributed.
+
+```{r, results='asis'}
+
+props_toTest <- stool_metab_long %>%
+  mutate(log10_umol_g = log10(umol_g))
+
+my_formula <- "log10_umol_g ~ timepoint_numeric * growth_cat + npo_days_prop + feeds_prop_hm + AbxHoursPerHOL + Sex"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "metab", props_toTest = props_toTest, s_toTest = s_toTest, form1 = my_formula, rep_mes_label = "SubjectID", p_cutoff = 1)
+
+my_table <- summaries_df %>%
+  mutate(term = str_replace(term, "growth_cat", "")) %>%
+  mutate(term = str_replace(term, "SexM", "Male"))
+
+my_table %>%
+  filter(p.value < 0.05) %>%
+  pander(digits = 2, split.table = Inf, caption = glue("Linear models of log10 transformed concentrations of metabolites. Filtered with p.value < 0.05. SubjectID added as a random effect. Full formula: {my_formula}"))
+
+my_table %>% table_export(title = "Sagori_metabolites_table_")
+
+```
+
+A lot of them are strongly associated with the amount of Antibiotics given to the babies. Let's graph that.
+
+### Samples by Abx use
+
+```{r, fig.width=10, fig.height=7}
+
+metabs_to_plot <- my_table %>%
+  filter(fdr < 0.05, term %in% "AbxHoursPerHOL") %>%
+  pull(metab) %>%
+  unique()
+
+number_of_blocks <- ceiling(length(metabs_to_plot) / 9)
+my_blocks <- chunk_it(metabs_to_plot, number_of_blocks)
+
+for (i in 1:number_of_blocks) {
+  subset <- my_blocks[[i]]
+  
+  g <- metab_to_Plot %>%
+    inner_join(s_toTest %>% select(SampleID, AbxHoursPerHOL), by = "SampleID") %>%
+    filter(!is.na(AbxHoursPerHOL), metab %in% subset) %>%
+    ggplot(aes(x=AbxHoursPerHOL, y=umol_g, color=TimePoint)) +
+    geom_point() +
+    theme_bw() +
+    facet_wrap(~metab, scales="free_y") +
+    theme(
+      axis.text.x=element_text(angle=45, hjust=1, vjust=1),
+      panel.grid = element_blank(),
+      strip.background = element_blank(),
+      legend.position = "bottom"
+    ) +
+    scale_color_manual(values = ann_colors$TimePoint) +
+    scale_y_continuous(trans = "log10") +
+    labs(
+      x="AbxHoursPerHOL", color="Timepoint",
+      y="Concentration (umol/g)"
+    )
+  
+  plot(g)
+  
+}
+
+```
+
+## Linear models for growth failure
+
+Are there any significant differences between growth regular and growth failure? We will log10 transform the values since they do not appear normally distributed.
+
+```{r, results='asis'}
+
+props_toTest <- stool_metab_long %>%
+  mutate(log10_umol_g = log10(umol_g))
+
+my_formula <- "log10_umol_g ~ timepoint_numeric * growth_failure + npo_days_prop + feeds_prop_hm + AbxHoursPerHOL + Sex"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "metab", props_toTest = props_toTest, s_toTest = s_toTest, form1 = my_formula, rep_mes_label = "SubjectID", p_cutoff = 1)
+
+my_table <- summaries_df %>%
+  mutate(term = str_replace(term, "growth_failure", "")) %>%
+  mutate(term = str_replace(term, "SexM", "Male"))
+
+my_table %>%
+  filter(p.value < 0.05) %>%
+  pander(digits = 2, split.table = Inf, caption = glue("Linear models of log10 transformed concentrations of metabolites. Filtered with p.value < 0.05. SubjectID added as a random effect. Full formula: {my_formula}"))
+
+my_table %>% table_export(title = "Sagori_metabolites_table_")
+
+```
+
+# Metabolomics - Breast milk
+
+```{r message=FALSE, warning=TRUE}
+
+#Breast milk metabolites in millimolars (mM)
+
+bm_metab_raw <- read_csv(here("Data","breast_milk_metab.csv")) %>%
+  rename(nmr_no = `NMR No.`) %>%
+  select(-box, -location, -bm_barcode) %>%
+  mutate(redcap_id = as.character(redcap_id))
+
+```
+
+
+## Overview plots
+
+### Histograms of metabolites
+
+```{r, fig.width=10, fig.height=7}
+
+metab_names <- bm_metab_raw %>%
+  select(5:length(colnames(bm_metab_raw))) %>%
+  colnames()
+
+bm_metab_long <- bm_metab_raw %>%
+  pivot_longer(cols = all_of(metab_names), names_to = "metab", values_to = "mM", values_drop_na = T) %>%
+  droplevels()
+
+# any(bm_metab_long$mM == 0)
+# TRUE
+
+max_num <- max(bm_metab_long$mM)
+
+bm_metab_long %<>%
+  group_by(metab) %>%
+  mutate(metab_min = ifelse(mM == 0, max_num, mM)) %>%
+  mutate(mM = ifelse(mM == 0, min(metab_min)/2, mM)) %>%
+  ungroup()
+
+number_of_blocks <- ceiling(length(metab_names) / 9)
+my_blocks <- chunk_it(metab_names, number_of_blocks)
+
+for (i in 1:number_of_blocks) {
+  subset <- my_blocks[[i]]
+  
+  g <- bm_metab_long %>%
+    filter(metab %in% subset) %>%
+    ggplot(aes(mM)) +
+    geom_histogram() +
+    facet_wrap(~metab, scales="free")
+  
+  plot(g)
+  
+}
+
+```
+
+
+### Samples by growth category
+
+Zeros were replaced with 1/2 the minimum value per metabolite.
+
+```{r, fig.width=10, fig.height=7}
+
+metab_to_Plot <- bm_metab_long %>%
+  inner_join(s_toPlot %>% select(growth_cat, growth_failure, redcap_id) %>% unique(), by = "redcap_id") %>% 
+  droplevels()
+
+for (i in 1:number_of_blocks) {
+  subset <- my_blocks[[i]]
+  
+  g <- metab_to_Plot %>%
+    filter(!is.na(growth_cat), metab %in% subset) %>%
+    ggplot(aes(x=growth_cat, y=mM, color=growth_cat)) +
+    geom_boxplot(outlier.alpha = 0) +
+    geom_quasirandom(dodge.width = 0.75, groupOnX = T) +
+    theme_bw() +
+    facet_wrap(~metab, scales="free_y") +
+    theme(
+      axis.text.x=element_text(angle=45, hjust=1, vjust=1),
+      panel.grid = element_blank(),
+      strip.background = element_blank(),
+      legend.position = "none"
+    ) +
+    scale_y_continuous(trans = "log10") +
+    scale_color_manual(values = ann_colors$growth_cat) +
+    labs(
+      x="Growth category",
+      y="Concentration (mM)"
+    )
+  
+  plot(g)
+  
+}
+    
+```
+
+### Samples by growth failure
+
+All breast milk samples were growth regular.
+
+## Linear models
+
+Are there any significant differences between growth categories? We will log10 transform the values since they do not appear normally distributed.
+
+```{r, results='asis'}
+
+props_toTest <- metab_to_Plot %>%
+  mutate(log10_mM = log10(mM))
+
+my_formula <- "log10_mM ~ growth_cat"
+my_random_effect <- "~ 1 | redcap_id"
+p_cutoff = 1
+
+summaries_df <- props_toTest %>%
+  group_by(metab) %>%
+  do(tidy_lmer(nlme::lme(as.formula(my_formula), random = as.formula(my_random_effect), data=., na.action=na.omit))) %>%
+  ungroup() %>%
+  filter(term != '(Intercept)') %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() %>%
+  filter(p.value<p_cutoff)
+
+my_table <- summaries_df %>%
+  mutate(term = str_replace(term, "growth_cat", ""))
+
+my_table %>%
+  filter(p.value < 0.05) %>%
+  pander(digits = 2, split.table = Inf, caption = glue("Linear models of log10 transformed concentrations of metabolites. Filtered with p.value < 0.05. SubjectID added as a random effect. Full formula: {my_formula}"))
+
+my_table %>% table_export(title = "Sagori_metabolites_table_")
+
+```
+
+\newpage
+
+# Correlating metabolites
+
+In this section we will correlate metabolites to other variables and themselves. We will do this with the stool samples.
+
+## Kegg pathways to metab
+
+```{r}
+
+metab_df <- stool_metab_long %>%
+  mutate(log10_umol_g = log10(umol_g))
+
+selected_pathways <- kegg_path_props %>%
+  filter(!PathwayName %in% "Metabolic pathways") %>%
+  mutate(PathwayName = fct_lump(PathwayName, n = number_of_top_pathways, w = .$props, other_level = "Other")) %>%
+  filter(!PathwayName %in% "Other") %>%
+  droplevels() %>%
+  pull(PathwayName) %>%
+  unique()
+
+pathway_df <- kegg_path_props %>%
+  filter(PathwayName %in% selected_pathways) %>%
+  mutate(props_log10 = log10(props))
+
+my_df <- inner_join(metab_df, pathway_df, by = c("SampleID")) %>%
+  group_by(metab, PathwayName) %>%
+  summarize(cor = cor(log10_umol_g, props_log10), p.value = broom::tidy(cor.test(log10_umol_g, props_log10, method = "pearson"))$p.value) %>%
+  ungroup() %>%
+  mutate(fdr = p.adjust(p.value, method = "BH"))
+
+my_df_wide <- my_df %>%
+  select(metab, PathwayName, cor) %>%
+  pivot_wider(names_from = "PathwayName", values_from = cor)
+
+my_matrix <- my_df_wide %>%
+  column_to_rownames(var = "metab") %>%
+  as.matrix()
+
+significance_matrix <- my_df %>%
+  mutate(starred = ifelse(fdr < 0.05, "*", "")) %>%
+  pivot_wider(id_cols = metab, names_from = "PathwayName", values_from = starred) %>%
+  column_to_rownames(var = "metab") %>%
+  as.matrix()
+
+my_matrix %>%
+  pheat() %>%
+  pheat_display_main(display_numbers = significance_matrix) %>%
+  pheat_cluster_rows() %>%
+  pheat_cluster_cols() %>%
+  print()
+
+```
+
+```{r}
+heatmap_name = "kegg_pathways_to_metabs.pdf"
+
+my_matrix %>%
+  pheat() %>%
+  pheat_display_main(display_numbers = significance_matrix) %>%
+  pheat_cluster_rows() %>%
+  pheat_cluster_cols() %>%
+  pheat_save(filename = here("Output", heatmap_name))
+```
+
+Heatmap saved as `r heatmap_name`.
+
+\newpage
+
+## KEGG orthologs to metab
+
+Here we will correlate KEGG orthologs whose abundances changed with metabolites.
+
+### All timepoints growth faltering_individual_gene_changes_growth_categories
+
+```{r}
+
+gene_list <- read_csv(here("Output", "All timepoints growth faltering_individual_gene_changes_growth_categories.csv")) %>%
+  filter(fdr < 0.05) %>%
+  mutate(geneShortDescr = paste(Ortholog, str_trunc(Definition, 30), sep = ": "))
+
+ko_df <- kegg_props %>%
+  right_join(gene_list, by = c("geneID"= "Ortholog")) %>%
+  select(SampleID, geneShortDescr, count, props) %>%
+  mutate(props_log10 = log10(props))
+
+my_df <- inner_join(metab_df, ko_df, by = c("SampleID")) %>%
+  group_by(metab, geneShortDescr) %>%
+  summarize(cor = cor(log10_umol_g, props_log10), p.value = broom::tidy(cor.test(log10_umol_g, props_log10, method = "pearson"))$p.value) %>%
+  ungroup() %>%
+  mutate(fdr = p.adjust(p.value, method = "BH"))
+
+my_df_wide <- my_df %>%
+  select(metab, geneShortDescr, cor) %>%
+  pivot_wider(names_from = "geneShortDescr", values_from = cor)
+
+my_matrix <- my_df_wide %>%
+  column_to_rownames(var = "metab") %>%
+  as.matrix()
+
+significance_matrix <- my_df %>%
+  mutate(starred = ifelse(fdr < 0.05, "*", "")) %>%
+  pivot_wider(id_cols = metab, names_from = "geneShortDescr", values_from = starred) %>%
+  column_to_rownames(var = "metab") %>%
+  as.matrix()
+
+my_matrix %>%
+  pheat() %>%
+  pheat_display_main(display_numbers = significance_matrix) %>%
+  pheat_cluster_rows() %>%
+  pheat_cluster_cols() %>%
+  print()
+
+```
+
+```{r}
+heatmap_name = "KEGG_orthologs_to_metabs_all_timepoints.pdf"
+
+my_matrix %>%
+  pheat() %>%
+  pheat_display_main(display_numbers = significance_matrix) %>%
+  pheat_cluster_rows() %>%
+  pheat_cluster_cols() %>%
+  pheat_save(filename = here("Output", heatmap_name))
+```
+
+Heatmap saved as `r heatmap_name`.
+
+\newpage
+
+### 0to21day_individual_gene_changes_growth_categories
+
+```{r}
+
+gene_list1 <- read_csv(here("Output", "0to21day_individual_gene_changes_growth_categories.csv")) %>%
+  filter(fdr < 0.05) %>%
+  mutate(geneShortDescr = paste(Ortholog, str_trunc(Definition, 30), sep = ": ")) %>%
+  select(Ortholog, geneShortDescr)
+
+gene_list2 <- read_csv(here("Output", "0to21day_individual_gene_changes_growth_categories_gf.csv")) %>%
+  filter(fdr < 0.05) %>%
+  mutate(geneShortDescr = paste(Ortholog, str_trunc(Definition, 30), sep = ": ")) %>%
+  select(Ortholog, geneShortDescr)
+
+gene_list <- bind_rows(gene_list1, gene_list2) %>%
+  unique()
+
+ko_df <- kegg_props %>%
+  right_join(gene_list, by = c("geneID"= "Ortholog")) %>%
+  select(SampleID, geneShortDescr, count, props) %>%
+  mutate(props_log10 = log10(props))
+
+my_df <- inner_join(metab_df, ko_df, by = c("SampleID")) %>%
+  group_by(metab, geneShortDescr) %>%
+  summarize(cor = cor(log10_umol_g, props_log10), p.value = broom::tidy(cor.test(log10_umol_g, props_log10, method = "pearson"))$p.value) %>%
+  ungroup() %>%
+  mutate(fdr = p.adjust(p.value, method = "BH"))
+
+my_df_wide <- my_df %>%
+  select(metab, geneShortDescr, cor) %>%
+  pivot_wider(names_from = "geneShortDescr", values_from = cor)
+
+my_matrix <- my_df_wide %>%
+  column_to_rownames(var = "metab") %>%
+  as.matrix()
+
+significance_matrix <- my_df %>%
+  mutate(starred = ifelse(fdr < 0.05, "*", "")) %>%
+  pivot_wider(id_cols = metab, names_from = "geneShortDescr", values_from = starred) %>%
+  column_to_rownames(var = "metab") %>%
+  as.matrix()
+
+my_matrix %>%
+  pheat() %>%
+  pheat_display_main(display_numbers = significance_matrix) %>%
+  pheat_cluster_rows() %>%
+  pheat_cluster_cols() %>%
+  print()
+
+```
+
+```{r}
+heatmap_name = "KEGG_orthologs_to_metabs_0to21day.pdf"
+
+my_matrix %>%
+  pheat() %>%
+  pheat_display_main(display_numbers = significance_matrix) %>%
+  pheat_cluster_rows() %>%
+  pheat_cluster_cols() %>%
+  pheat_save(filename = here("Output", heatmap_name))
+```
+
+Heatmap saved as `r heatmap_name`.
+
+\newpage
+
+### 34to37weeks_individual_gene_changes_growth_categories
+
+```{r}
+
+gene_list1 <- read_csv(here("Output", "34to37weeks_individual_gene_changes_growth_categories.csv")) %>%
+  filter(fdr < 0.05) %>%
+  mutate(geneShortDescr = paste(Ortholog, str_trunc(Definition, 30), sep = ": ")) %>%
+  select(Ortholog, geneShortDescr)
+
+gene_list2 <- read_csv(here("Output", "34to37weeks_individual_gene_changes_growth_categories_gf.csv")) %>%
+  filter(fdr < 0.05) %>%
+  mutate(geneShortDescr = paste(Ortholog, str_trunc(Definition, 30), sep = ": ")) %>%
+  select(Ortholog, geneShortDescr)
+
+gene_list <- bind_rows(gene_list1, gene_list2) %>%
+  unique()
+
+ko_df <- kegg_props %>%
+  right_join(gene_list, by = c("geneID"= "Ortholog")) %>%
+  select(SampleID, geneShortDescr, count, props) %>%
+  mutate(props_log10 = log10(props))
+
+my_df <- inner_join(metab_df, ko_df, by = c("SampleID")) %>%
+  group_by(metab, geneShortDescr) %>%
+  summarize(cor = cor(log10_umol_g, props_log10), p.value = broom::tidy(cor.test(log10_umol_g, props_log10, method = "pearson"))$p.value) %>%
+  ungroup() %>%
+  mutate(fdr = p.adjust(p.value, method = "BH"))
+
+my_df_wide <- my_df %>%
+  select(metab, geneShortDescr, cor) %>%
+  pivot_wider(names_from = "geneShortDescr", values_from = cor)
+
+my_matrix <- my_df_wide %>%
+  column_to_rownames(var = "metab") %>%
+  as.matrix()
+
+significance_matrix <- my_df %>%
+  mutate(starred = ifelse(fdr < 0.05, "*", "")) %>%
+  pivot_wider(id_cols = metab, names_from = "geneShortDescr", values_from = starred) %>%
+  column_to_rownames(var = "metab") %>%
+  as.matrix()
+
+my_matrix %>%
+  pheat() %>%
+  pheat_display_main(display_numbers = significance_matrix) %>%
+  pheat_cluster_rows() %>%
+  pheat_cluster_cols() %>%
+  print()
+
+```
+
+```{r}
+heatmap_name = "KEGG_orthologs_to_metabs_34to37weeks.pdf"
+
+my_matrix %>%
+  pheat() %>%
+  pheat_display_main(display_numbers = significance_matrix) %>%
+  pheat_cluster_rows() %>%
+  pheat_cluster_cols() %>%
+  pheat_save(filename = here("Output", heatmap_name))
+```
+
+Heatmap saved as `r heatmap_name`.
+
+\newpage
+
+## Butyrate genes to the other metab
+
+```{r}
+
+but_df <- but_ipa %>%
+  inner_join(s_toTest, by = "SampleID") %>%
+  filter(SampleID %in% stool_metab$SampleID) %>%
+  mutate(props_log10 = log10(props))
+
+my_df <- inner_join(metab_df, but_df, by = c("SampleID")) %>%
+  group_by(metab, geneID) %>%
+  summarize(cor = cor(log10_umol_g, props_log10), p.value = broom::tidy(cor.test(log10_umol_g, props_log10, method = "pearson"))$p.value) %>%
+  ungroup() %>%
+  mutate(fdr = p.adjust(p.value, method = "BH"))
+
+my_df_wide <- my_df %>%
+  select(metab, geneID, cor) %>%
+  pivot_wider(names_from = "geneID", values_from = cor)
+
+my_matrix <- my_df_wide %>%
+  column_to_rownames(var = "metab") %>%
+  as.matrix()
+
+significance_matrix <- my_df %>%
+  mutate(starred = ifelse(fdr < 0.05, "*", "")) %>%
+  pivot_wider(id_cols = metab, names_from = "geneID", values_from = starred) %>%
+  column_to_rownames(var = "metab") %>%
+  as.matrix()
+
+my_matrix %>%
+  pheat() %>%
+  pheat_display_main(display_numbers = significance_matrix) %>%
+  pheat_cluster_rows() %>%
+  pheat_cluster_cols() %>%
+  print()
+
+```
+
+```{r}
+heatmap_name = "butyrate_genes_to_metabs.pdf"
+
+my_matrix %>%
+  pheat() %>%
+  pheat_display_main(display_numbers = significance_matrix) %>%
+  pheat_cluster_cols() %>%
+  pheat_cluster_rows() %>%
+  pheat_save(filename = here("Output", heatmap_name))
+```
+
+Heatmap saved as `r heatmap_name`.
+
+\newpage
+
+## Most abundant taxa to bile acids
+
+We will filter out taxa that have less than 1% mean abundance across samples. We will also manually include butyrate producers (those are the ones with shortened names).
+
+```{r}
+
+but_producers <- read_csv(here("Data", "but_producers_bacdive_2024-03-19.csv"), skip = 1)
+
+thing <- summed_props_long %>%
+  mutate(Taxa = str_remove(Taxa, "\\w+ ")) %>%
+  filter(Taxa %in% but_producers$species | str_detect(Taxa, "butyric"))
+
+```
+
+```{r}
+
+taxa_df <- summed_props_long %>%
+  group_by(Taxa) %>%
+  mutate(mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(mean_prop > 0.01) %>%
+  bind_rows(thing) %>%
+  mutate(props_log10 = log10(props))
+
+my_df <- inner_join(metab_df, taxa_df, by = c("SampleID")) %>%
+  group_by(metab, Taxa) %>%
+  summarize(cor = cor(log10_umol_g, props_log10), p.value = broom::tidy(cor.test(log10_umol_g, props_log10, method = "pearson"))$p.value) %>%
+  ungroup() %>%
+  mutate(fdr = p.adjust(p.value, method = "BH"))
+
+my_df_wide <- my_df %>%
+  select(metab, Taxa, cor) %>%
+  pivot_wider(names_from = "Taxa", values_from = cor)
+
+my_matrix <- my_df_wide %>%
+  column_to_rownames(var = "metab") %>%
+  as.matrix()
+
+significance_matrix <- my_df %>%
+  mutate(starred = ifelse(fdr < 0.05, "*", "")) %>%
+  pivot_wider(id_cols = metab, names_from = "Taxa", values_from = starred) %>%
+  column_to_rownames(var = "metab") %>%
+  as.matrix()
+
+my_matrix %>%
+  pheat() %>%
+  pheat_display_main(display_numbers = significance_matrix) %>%
+  pheat_cluster_rows() %>%
+  pheat_cluster_cols() %>%
+  print()
+
+```
+
+```{r}
+heatmap_name = "most_abundant_taxa_to_metabs.pdf"
+
+my_matrix %>%
+  pheat() %>%
+  pheat_display_main(display_numbers = significance_matrix) %>%
+  pheat_cluster_rows() %>%
+  pheat_cluster_cols() %>%
+  pheat_save(filename = here("Output", heatmap_name))
+```
+
+Heatmap saved as `r heatmap_name`.
+
+\newpage
+
+## Metabolites to themselves
+
+```{r}
+
+my_df <- inner_join(metab_df, metab_df, by = c("SampleID")) %>%
+  group_by(metab.x, metab.y) %>%
+  summarize(cor = cor(log10_umol_g.x, log10_umol_g.y), p.value = broom::tidy(cor.test(log10_umol_g.x, log10_umol_g.y, method = "pearson"))$p.value) %>%
+  ungroup() %>%
+  mutate(fdr = p.adjust(p.value, method = "BH"))
+
+my_df_wide <- my_df %>%
+  select(metab.x, metab.y, cor) %>%
+  pivot_wider(names_from = "metab.y", values_from = cor)
+
+my_matrix <- my_df_wide %>%
+  column_to_rownames(var = "metab.x") %>%
+  as.matrix()
+
+significance_matrix <- my_df %>%
+  mutate(starred = ifelse(fdr < 0.05, "*", "")) %>%
+  pivot_wider(id_cols = metab.x, names_from = "metab.y", values_from = starred) %>%
+  column_to_rownames(var = "metab.x") %>%
+  as.matrix()
+
+my_matrix %>%
+  pheat() %>%
+  pheat_display_main(display_numbers = significance_matrix) %>%
+  pheat_cluster_rows() %>%
+  pheat_cluster_cols() %>%
+  print()
+
+```
+
+```{r}
+heatmap_name = "metabs_to_themselves.pdf"
+
+my_matrix %>%
+  pheat() %>%
+  pheat_display_main(display_numbers = significance_matrix) %>%
+  pheat_cluster_rows() %>%
+  pheat_cluster_cols() %>%
+  pheat_save(filename = here("Output", heatmap_name))
+```
+
+Heatmap saved as `r heatmap_name`.
+
+\newpage
+
+
+
+# END
+
+```{r Generate time stamped report, eval=FALSE, include=FALSE}
+
+rstudioapi::documentSaveAll()
+
+script_dir <- file.path("Scripts","Rmds")
+output_dir <- file.path("Output")
+
+report_fp <- here::here(script_dir, "Shotgun_metabolomic_analysis.Rmd")
+output_fp <- here::here(output_dir, paste('Sagori_growth_metabolomics_', Sys.Date(), '.pdf', sep=''))
+
+rmarkdown::render(input = report_fp, output_file = output_fp)
+
+```
+
+```{r save data}
+
+save.image(file = here("Data","sagori_metabolomics_data.RData"))
+
+```
