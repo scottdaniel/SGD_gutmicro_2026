@@ -4,3 +4,7 @@ kegg4.rds
 kegg5.rds
 All timepoints growth faltering_kegg500_changes.RDS
 kegg_bc_permanova_results.rds
+kegg_bc_permanova_results_0to21days.rds
+kegg_bc_permanova_results_0to21days_2.rds
+kegg_bc_permanova_results_34to37weeks.rds
+kegg_bc_permanova_results_34to37weeks_gf.rds

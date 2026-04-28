@@ -1,0 +1,2614 @@
+---
+title: |
+  ![](CHOPMC_logo.pdf){width=5in}
+  \break
+  Sagori Mukhopadhyay - Runs 1 to 5 - Growth Analysis - Gene Abundances
+author: "Scott G. Daniel, PennCHOP Microbiome Program"
+date: \today
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r knitr setup, echo=FALSE, message=FALSE}
+library(knitr)
+opts_chunk$set(
+  tidy=FALSE,
+  cache=FALSE,
+  echo=FALSE,
+  warning=FALSE,
+  message=FALSE,
+  dpi=100,
+  fig.width=5,
+  fig.height=3,
+  fig.align = "center"
+  )
+```
+
+```{r libraries, message=FALSE, warning=FALSE}
+library(here)
+library(ggbeeswarm)
+library(grid)
+library(magrittr)
+library(pander)
+library(pheatmap)
+library(usedist)
+library(qiimer)
+library(reshape2)
+library(jsonlite)
+library(vegan)
+library(ape)
+library(tidyverse)
+library(gghighlight)
+library(RColorBrewer)
+library(patchwork)
+library(kylemisc)
+library(ggpubr)
+library(GGally)
+library(glue)
+library(emmeans)
+library(adonisplus)
+
+#MOAR cOLORS!!!
+library(ggsci)
+library(ghibli)
+library(qualpalr)
+
+panderOptions("knitr.auto.asis", FALSE)
+#this also means that you have to put results='asis' in any block that has pander output
+#this lets you loop through variables and produce multiple pander tables and ggplots in a
+#single code block!
+
+```
+
+```{r functions}
+
+source(here("Scripts","Functions","common_functions.R"))
+source(here("Scripts","Functions","scott_daniel_useful_R_functions.R"))
+source(here("Scripts","Functions","for_functional_analysis.R"))
+
+```
+
+```{r load savepoint, include=FALSE}
+#you can load data here if you have a savepoint from your main R markdown (but remember that libraries do not get saved)
+load(here("Data","after_taxa_analysis.RData"))
+
+table_export <- table_iterator()
+```
+
+```{r constants}
+
+ec_fp <- here("Data","ec.list")
+ko_ec_fp <- here("Data", "ko_enzyme.list")
+ko_definitions_fp <- here("Data", "ko_definition.list")
+ko_mo_fp <- here("Data", "ko_module.list")
+ko_mo_info_fp <- here("Data", "KEGG_modules_info.tsv")
+mo_pathway_fp <- here("Data", "module_pathway.list")
+
+```
+
+# KEGG
+
+Reads were aligned to the Kyoto Encyclopedia of Genes and Genomes (downloaded on February 28, 2019) using diamond sequence aligner (PMID:33828273). The resulting protein hits were mapped to KEGG ortholog database. Below is a PCoA plot of Bray-Curtis distances using relative abundances of KEGG orthologs.
+
+```{r loading kegg data}
+
+### KEGG orthology assignment
+
+s_seq <- s2
+library(viridis)
+## Set colors for each factor ahead of time so they are consistent through the report.
+ann_colors = list(
+  category = setNames(brewer.pal(length(levels(s_seq$category)), "Set2"), levels(s_seq$category)),
+  growth_cat = setNames(as.character(ghibli_palette("YesterdayMedium", direction = -1)[1:length(levels(s_seq$growth_cat))]), levels(s_seq$growth_cat)),
+  TimePoint = setNames(viridis(length(levels(s_seq$TimePoint))), levels(s_seq$TimePoint)),
+  growth_fail = setNames(qualpal(2)$hex, levels(s_seq$growth_failure))
+)
+
+kegg_1to3 <- read_table_if_no_rds(base_dir = here("Data","gene_hits","run1to3","20190228_kegg_species_prokaryotes"), name_of_table = kegg, rds_file_name = "kegg1to3.rds") %>%
+  filter(SampleID %in% s_seq$SampleID)
+kegg_4 <- read_table_if_no_rds(base_dir = here("Data","gene_hits","run4","20190228_kegg_species_prokaryotes"), name_of_table = kegg, rds_file_name = "kegg4.rds") %>%
+  filter(SampleID %in% s_seq$SampleID)
+kegg_5 <- read_table_if_no_rds(base_dir = here("Data","gene_hits","run5","20190228_kegg_species_prokaryotes"), name_of_table = kegg, rds_file_name = "kegg5.rds") %>%
+  filter(SampleID %in% s_seq$SampleID)
+
+kegg <- bind_rows(kegg_1to3, kegg_4, kegg_5)
+
+kegg_props_raw <- kegg %>%
+  group_by(SampleID) %>%
+  mutate(sample_sum = sum(count)) %>%
+  mutate(props = count / sample_sum) %>%
+  ungroup()
+
+# replace zeros per gene
+kegg_props <- kegg_props_raw %>%
+  group_by(geneID) %>%
+  filter(sum(count) > 0) %>%
+  mutate(geneID_min = min(props[props > 0])) %>%
+  mutate(props = ifelse(props == 0, geneID_min/2, props)) %>%
+  ungroup() %>%
+  select(-geneID_min, -sample_sum, -database)
+
+rm(kegg_1to3, kegg_4, kegg_5)
+
+kegg_defnitions <- read_tsv(here("Data", "ko_definition.list"), col_names = c("Ortholog", "Definition")) %>%
+  mutate(Ortholog = str_remove(Ortholog, "ko:"))
+
+prokarotic_paths <- read_tsv(here("Data","prokaryotic_pathway.list"), col_names = c("PathwayID", "Description")) %>%
+  mutate(PathwayID = paste0("path:map", PathwayID)) %>%
+  left_join(read_rds(here("Data","kegg_pathways.RDS")), by = "PathwayID") %>%
+  mutate(Ortholog = str_remove(Ortholog, "ko:")) %>%
+  select(-Description)
+
+path_annotation <- prokarotic_paths %>%
+  select(Ortholog, PathwayName) %>%
+  group_by(Ortholog) %>%
+  summarise(Pathways = paste0(PathwayName, collapse = ", ")) %>%
+  ungroup()
+
+```
+
+```{r glycoside hydrolases}
+ec_names <- read_delim(ec_fp, delim='\t', col_names = F) %>%
+  setNames(c("EC_id", "EC_desc")) %>%
+  separate(EC_desc, into=c("EC_desc", "rest"), extra = "merge", sep = ';') %>%
+  select(-rest)
+
+kegg_info <- read.delim(ko_ec_fp, stringsAsFactors = F, sep='\t', header = F) %>%
+  setNames(c("geneID", "EC_id")) %>%
+  mutate(geneID = sub("ko:", "", geneID)) %>%
+  group_by(geneID) %>%
+  mutate(weight = 1/n()) %>%
+  ungroup()
+
+kegg_ec <- kegg_props %>%
+  left_join(kegg_info, by="geneID") %>%
+  mutate(count = count*weight, props = props*weight) %>%
+  group_by(SampleID, EC_id) %>%
+  summarize(count = sum(count), props = sum(props), .groups = "drop") %>%
+  ungroup() %>%
+  filter(!is.na(EC_id))
+
+kegg_gh <- kegg_ec %>%
+  filter(grepl("ec:3\\.2\\.1\\.", EC_id)) %>%
+  droplevels()
+
+```
+
+```{r}
+current_sub_study <- "All timepoints growth faltering"
+```
+
+# All timepoints
+
+## Growth faltering
+
+### Bray-curtis PCoA
+
+First, we will examine overall differences using PCoA of the Bray-curtis' distances of the gene abundances between samples.
+
+#### PCoA's
+
+```{r}
+
+if (current_sub_study %in% s_seq$sub_study) {
+  s_toTest <- s_toPlot <- s_seq %>%
+    filter(str_detect(sub_study, current_sub_study))
+} else {
+  s_toTest <- s_toPlot <- s_seq
+}
+
+ko <- kegg_props_raw %>%
+  filter(SampleID %in% s_toPlot$SampleID) %>%
+  select(SampleID, geneID, count) %>%
+  spread_to_numeric_matrix(., "geneID", "SampleID", "count")
+
+bc_kegg <- vegdist(t(ko))
+
+dist_in <- usedist::dist_subset(bc_kegg, s_toPlot$SampleID)
+
+ann_colors = list(
+  category = setNames(brewer.pal(length(levels(s_toTest$category)), "Set2"), levels(s_toTest$category)),
+  growth_cat = setNames(as.character(ghibli_palette("YesterdayMedium", direction = -1)[1:length(levels(s_toTest$growth_cat))]), levels(s_toTest$growth_cat)),
+  TimePoint = setNames(viridis(length(levels(s_toTest$TimePoint))), levels(s_toTest$TimePoint)),
+  growth_fail = setNames(qualpal(2)$hex, levels(s_toTest$growth_failure))
+)
+
+```
+
+```{r fig.height=5, fig.width=5}
+s_toPlot %>%
+  pcoaplus(bc_kegg) %>%
+  plot(color=TimePoint) +
+    scale_color_manual(values=ann_colors$TimePoint) +
+    theme_bw() +
+    theme(
+      axis.text=element_blank(),
+      axis.ticks=element_blank(),
+      panel.grid = element_blank(), 
+      aspect.ratio = 1,
+      strip.background = element_blank()
+    ) + 
+    labs(color="", title="Bray-Curtis")
+```
+
+```{r fig.height=5, fig.width=5}
+s_toPlot %>%
+  pcoaplus(bc_kegg) %>%
+  plot(color=growth_cat) +
+    scale_color_manual(values=ann_colors$growth_cat) +
+    theme_bw() +
+    theme(
+      axis.text=element_blank(),
+      axis.ticks=element_blank(),
+      panel.grid = element_blank(), 
+      aspect.ratio = 1,
+      strip.background = element_blank()
+    ) + 
+    labs(color="", title="Bray-Curtis")
+```
+
+#### Permanova
+
+AbxHoursPerHOL has been taken out because it is collinear with npo_days_prop.
+
+Ok, now I know why I didn't redo this report because all of the gene abundance stuff we actually need is in FiguresANDTables.Rmd.
+
+```{r, results='asis'}
+s_permanova <- s_toTest %>%
+  filter(!is.na(log_npo_days_prop))
+
+summaries_df <-
+  s_permanova %>%
+    do(adonisplus(
+      ., distmat = bc_kegg, formula = distmat ~ log_npo_days_prop + bwt_z + WOL * growth_cat,
+      sample_id_var = SampleID, rep_meas_var = SubjectID,
+      shuffle = c(growth_cat = "between", WOL = "within"), permutations=perm)) %>%
+    ungroup() %>%
+    mutate(metric = "Bray-Curtis") %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(metric, everything())
+
+write_rds(summaries_df, here("Data", "kegg_bc_permanova_results.rds"))
+
+summaries_df <- read_rds(here("Data", "kegg_bc_permanova_results.rds"))
+
+table_export(summaries_df, "gene_analysis_table_")
+
+summaries_df %>%
+  pander(split.cells = Inf, digits = 2, emphasize.strong.rows = which(.$p.value<=0.05))
+
+```
+
+```{r}
+
+sum_of_counts <- kegg %>%
+  select(SampleID, Ortholog = geneID, count) %>%
+  inner_join(prokarotic_paths, by = "Ortholog") %>%
+  group_by(SampleID) %>%
+  summarise(sample_sums = sum(count))
+
+kegg_path_props <- kegg %>%
+  select(SampleID, Ortholog = geneID, count) %>%
+  inner_join(prokarotic_paths, by = "Ortholog") %>%
+  group_by(PathwayName, SampleID) %>%
+  summarise(count = sum(count)) %>%
+  ungroup() %>%
+  inner_join(sum_of_counts, by = "SampleID") %>%
+  mutate(props = count / sample_sums)
+
+kegg_path_props %<>%
+  group_by(PathwayName) %>%
+  filter(sum(count) > 0) %>%
+  mutate(pathway_min = min(props[props > 0])) %>%
+  mutate(props = ifelse(props == 0, pathway_min/2, props)) %>%
+  ungroup() %>%
+  select(-pathway_min, -sample_sums, -count) %>%
+  droplevels()
+
+```
+
+
+```{r saving for random forest analysis}
+
+save(ann_colors, ec_names, kegg, kegg_ec, kegg_gh, kegg_info, kegg_path_props, kegg_props, kegg_props_raw, ko, prokarotic_paths, file = here("Data", "sagori_kegg_data.RData"))
+
+```
+
+### Linear models of pathways
+
+```{r, results='asis'}
+
+number_of_top_pathways = 25
+
+props_toTest <- kegg_path_props %>%
+  mutate(props_log2 = log2(props)) %>%
+  mutate(PathwayName = fct_lump(PathwayName, n = number_of_top_pathways, w = .$props, other_level = "Other")) %>%
+  filter(!PathwayName %in% c("Metabolic pathways", "Other"))
+
+form1 = "props_log2 ~ timepoint_numeric * growth_cat + npo_days_prop + feeds_prop_hm + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "PathwayName", props_toTest = props_toTest, s_toTest = s_toTest, form1 = form1,rep_mes_label = random1, p_cutoff =  0.05) 
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log2 transformed abundances of KEGG pathways"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+table_export(summaries_df, "gene_analysis_table_")
+
+```
+
+```{r stats1}
+
+zeug_df <- kegg_path_props %>%
+  mutate(props_log2 = log2(props)) %>%
+  mutate(PathwayName = fct_lump(PathwayName, n = number_of_top_pathways, w = .$props, other_level = "Other")) %>%
+  group_by(PathwayName) %>%
+  summarise(total_prop = sum(props)) %>%
+  ungroup() %>%
+  mutate(fraction = total_prop / sum(total_prop))
+
+total_path_abund <- zeug_df %>%
+  filter(!PathwayName %in% c("Metabolic pathways", "Other")) %>%
+  summarise(total_fraction = sum(fraction))
+
+```
+
+The top 25 pathways (excluding the general "Metabolic pathways") covered `r total_path_abund$total_fraction*100`% of all KEGG ortholog abundances.
+
+#### Boxplot of pathway abundances
+
+```{r boxplot}
+
+to_select <- unique(as.character(summaries_df$PathwayName))
+
+number_of_blocks <- ceiling(length(to_select) / 9)
+chunk_it <- function(x,n) split(x, cut(seq_along(x), n, labels = FALSE))
+my_blocks <- chunk_it(to_select, number_of_blocks)
+
+for (i in 1:number_of_blocks) {
+  subset <- my_blocks[[i]]
+
+  props_toTest %>%
+    filter(PathwayName %in% subset) %>%
+    filter(SampleID %in% s_toTest$SampleID) %>%
+    merge(s_toTest, by="SampleID") %>%
+    
+    mutate(PathwayName = reorder(PathwayName, -props)) %>%
+    ggplot(aes(x=growth_cat, y=props, color=growth_cat)) +
+    geom_boxplot(outlier.alpha = 0) +
+    geom_quasirandom(dodge.width = 0.75) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle=45, vjust=1, hjust=1),
+      strip.background = element_blank()) +
+    #scale_color_manual(values=brewer.pal(8, "Set1")[c(2,5,1)]) +
+    scale_color_brewer(palette = "Set2") +
+    scale_y_continuous(trans = "log2") +
+    facet_wrap(~PathwayName, scales="free_y", ncol=3) +
+    labs(x="", color="growth_cat",
+         y="Relative abundance",
+         title = "Pathways in samples that had gene abundance differences")
+  
+  ggsave(here("Output",glue("{current_sub_study}_kegg_pathway_differences_{i}.pdf")), height=7, width=12, useDingbats=F)
+}
+
+```
+
+#### Those that changed
+
+```{r}
+
+pathways_to_select <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation")) %>%
+  pull(PathwayName) %>%
+  unique()
+
+summaries_df <- run_lmer_on_props(factor_to_test = "PathwayName", props_toTest = props_toTest, s_toTest = s_toTest, form1 = form1,rep_mes_label = random1, p_cutoff =  1)
+
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), PathwayName %in% pathways_to_select) %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(PathwayName = fct_reorder(PathwayName, Value))
+
+g <- ggplot(plot_df, aes(Value, PathwayName, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c(1,19)) +
+  scale_color_manual(values=ann_colors$growth_cat[2:3]) +
+  labs(y = "KEGG Pathway",
+       x = "<-- Decreased vs. normal growth    Increased vs. normal growth -->",
+       color = "Growth category")
+
+plot(g)
+
+ggsave(here("Output", glue("{current_sub_study}_kegg_pathway_pvalue_graph.pdf")), height = 5, width = 7)
+
+```
+
+### KEGG orthologs
+
+Taking the top 500 KEGG orthologs and testing them
+
+```{r message=FALSE, warning=FALSE, paged.print=TRUE, results='asis'}
+
+top500 <- kegg_props %>%
+  filter(SampleID %in% s_toTest$SampleID) %>%
+  group_by(geneID) %>%
+  summarise(mean_props = mean(props)) %>%
+  arrange(desc(mean_props)) %>%
+  slice(1:500)
+
+kegg_props_subset <- kegg_props %>%
+  select(SampleID, Ortholog = geneID, count, props) %>%
+  filter(Ortholog %in% top500$geneID) %>%
+  mutate(props_log2 = log2(props))
+
+form1 = "props_log2 ~ timepoint_numeric * growth_cat + npo_days_prop + feeds_prop_hm + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+# summaries_df <- run_lmer_on_props(factor_to_test = "Ortholog", props_toTest = kegg_props_subset, s_toTest = s_toTest, form1 = form1, p_cutoff = 1, rep_mes_label = random1)
+# 
+# save(summaries_df, file = here("Data", glue("{current_sub_study}_kegg500_changes.RDS")))
+
+load(file = here("Data", glue("{current_sub_study}_kegg500_changes.RDS")))
+
+to_select <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), fdr < 0.05, Value > 0) %>%
+  arrange(desc(Value)) %>%
+  slice(1:45) %>%
+  pull(Ortholog) %>%
+  as.character() %>%
+  unique()
+#actually top 32
+  
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), Ortholog %in% to_select) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  mutate(ortho_lable = paste(Ortholog, str_trunc(Definition, 30, "right"))) %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(ortho_lable = fct_reorder(ortho_lable, Value))
+
+g <- ggplot(plot_df, aes(Value, ortho_lable, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c(1,19)) +
+  scale_color_manual(values=ann_colors$growth_cat[2:3]) +
+  labs(y = "Ortholog / Description",
+       x = "<-- Decreased vs. normal growth    Increased vs. normal growth -->",
+       color = "Growth category")
+
+plot(g)
+
+ggsave(here("Output", glue("{current_sub_study}_top_increasing_orthologs.pdf")), height = 7, width = 10)
+
+to_select <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), fdr < 0.05, Value < 0) %>%
+  arrange(desc(Value)) %>%
+  slice(1:45) %>%
+  pull(Ortholog) %>%
+  as.character() %>%
+  unique()
+#actually top 32
+  
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), Ortholog %in% to_select) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  mutate(ortho_lable = paste(Ortholog, str_trunc(Definition, 30, "right"))) %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(ortho_lable = fct_reorder(ortho_lable, Value))
+
+g <- ggplot(plot_df, aes(Value, ortho_lable, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c(1,19)) +
+  scale_color_manual(values=ann_colors$growth_cat[2:3]) +
+  labs(y = "Ortholog / Description",
+       x = "<-- Decreased vs. normal growth    Increased vs. normal growth -->",
+       color = "Growth category")
+
+plot(g)
+
+ggsave(here("Output", glue("{current_sub_study}_top_decreasing_orthologs.pdf")), height = 7, width = 10)
+
+table_name <- glue("{current_sub_study}_individual_gene_changes_growth_categories.csv")
+
+my_table <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), fdr < 0.05) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  left_join(path_annotation, by = "Ortholog")
+
+write_csv(my_table, here("Output", table_name))
+
+print(glue("All orthologs saved together as {table_name}"))
+
+```
+
+```{r stats2}
+
+kegg_top_500 <- kegg_props %>%
+  select(SampleID, Ortholog = geneID, count, props) %>%
+  mutate(props_log2 = log2(props)) %>%
+  mutate(Ortholog = fct_other(Ortholog, keep = top500$geneID, other_level = "Other")) %>%
+  group_by(Ortholog) %>%
+  summarise(total_prop = sum(props)) %>%
+  ungroup() %>%
+  mutate(fraction = total_prop / sum(total_prop))
+
+total_KEGG_abund <- kegg_top_500 %>%
+  filter(!Ortholog %in% c("Other")) %>%
+  summarise(total_fraction = sum(fraction))
+
+
+```
+
+The top 500 KEGG terms covered `r total_KEGG_abund$total_fraction*100`% of all KEGG ortholog abundances.
+
+### Butyrate and Aromatic amino acids
+
+Reads from the study were aligned to protein sequences from referenced publications using Diamond. The databases were:
+
+-(Butyrate genes)[https://mbio.asm.org/content/5/2/e00889-14]
+
+-(Aromatic amino acids)[https://pubmed.ncbi.nlm.nih.gov/29168502]
+
+```{r load but_ipa data}
+
+butyrate_info <- read.delim(here::here("Data","butyrate_gene_info_full.tsv"), stringsAsFactors = F) %>%
+  select(geneID="gene_name", taxon=Genome.Name, pathway_name)
+
+# but1to3 <- read_gene_aln_results(here("Data","gene_hits", "run1to3", "butyrate_20180612")) %>%
+#   left_join(butyrate_info, by=c("geneID", "taxon")) %>%
+#   filter(SampleID %in% s_seq$SampleID)
+# but4 <- read_gene_aln_results(here("Data","gene_hits", "run4", "butyrate_20180612")) %>%
+#   left_join(butyrate_info, by=c("geneID", "taxon")) %>%
+#   filter(SampleID %in% s_seq$SampleID)
+# but5 <- read_gene_aln_results(here("Data","gene_hits", "run5", "butyrate_20180612")) %>%
+#   left_join(butyrate_info, by=c("geneID", "taxon")) %>%
+#   filter(SampleID %in% s_seq$SampleID)
+# 
+# but <- bind_rows(but1to3, but4, but5)
+# rm(but1to3, but4, but5)
+# 
+# ipa1to3 <- read_gene_aln_results(here("Data","gene_hits", "run1to3", "IPA_proteins")) %>%
+#   left_join(butyrate_info, by=c("geneID", "taxon")) %>%
+#   filter(SampleID %in% s_seq$SampleID)
+# ipa4 <- read_gene_aln_results(here("Data","gene_hits", "run4", "IPA_proteins")) %>%
+#   left_join(butyrate_info, by=c("geneID", "taxon")) %>%
+#   filter(SampleID %in% s_seq$SampleID)
+# ipa5 <- read_gene_aln_results(here("Data","gene_hits", "run5", "IPA_proteins")) %>%
+#   left_join(butyrate_info, by=c("geneID", "taxon")) %>%
+#   filter(SampleID %in% s_seq$SampleID)
+# 
+# ipa <- bind_rows(ipa1to3, ipa4, ipa5)
+# rm(ipa1to3, ipa4, ipa5)
+# 
+# but_ipa <- bind_rows(but, ipa) %>%
+#   right_join(s_seq, by = "SampleID") %>%
+#   mutate(props = count / kraken_counts) %>%
+#   group_by(SampleID, geneID, database, pathway_name) %>%
+#   summarize(count = sum(count), props = sum(props), .groups = "drop") %>%
+#   ungroup()
+# 
+# # replace zeros per gene
+# but_ipa %<>%
+#   group_by(geneID) %>%
+#   filter(sum(count) > 0) %>%
+#   mutate(geneID_min = min(props[props > 0])) %>%
+#   mutate(props = ifelse(props == 0, geneID_min/2, props)) %>%
+#   ungroup() %>%
+#   select(-geneID_min) %>%
+#   droplevels()
+# 
+# save(but_ipa, file = here("Data", "but_ipa.RData"))
+
+load(file = here("Data", "but_ipa.RData"))
+
+```
+
+#### Linear models
+
+```{r, results='asis'}
+
+props_toTest <- but_ipa %>%
+  mutate(props_log2 = log2(props))
+
+form1 = "props_log2 ~ timepoint_numeric * growth_cat + npo_days_prop + feeds_prop_hm + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "geneID", props_toTest = props_toTest, s_toTest = s_toTest, form1 = form1, p_cutoff = 1, rep_mes_label = random1)
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(p.value < 0.05) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log2 transformed abundances"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+table_export(summaries_df %>% filter(p.value < 0.05), "gene_analysis_table_")
+
+```
+
+#### Graphing these changes
+
+```{r}
+
+annot_df <- but_ipa %>%
+  select(geneID, database, pathway_name) %>%
+  unique() %>%
+  mutate(database = str_remove(database, "_20180612|_proteins")) %>%
+  mutate(database = ifelse(database %in% "IPA", "AAA", database))
+
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation")) %>%
+  left_join(annot_df, by = "geneID") %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(geneID = fct_reorder(geneID, Value))
+
+g <- ggplot(plot_df, aes(Value, geneID, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c(1,19)) +
+  scale_color_manual(values=ann_colors$growth_cat[2:3]) +
+  facet_grid(database~"Value", scales = "free_y", space = "free_y") +
+  labs(y = "geneID",
+       x = "<-- Decreased vs. normal growth    Increased vs. normal growth -->",
+       color = "Growth category")
+
+plot(g)
+
+ggsave(here("Output",glue("{current_sub_study}_gene_abundaces_but_ipa.pdf")), height=5, width=8, useDingbats=F)
+
+```
+
+```{r}
+current_sub_study <- "All timepoints growth failure"
+```
+
+## Growth failure
+
+Growth failure is now those babies who are the bottom 3rd percentile in terms of normal growth.
+
+### Bray-curtis PCoA
+
+First, we will examine overall differences using PCoA of the Bray-curtis' distances of the gene abundances between samples.
+
+#### PCoA's
+
+```{r fig.height=5, fig.width=5}
+s_toPlot %>%
+  pcoaplus(dist_in) %>%
+  plot(color=growth_failure) +
+    scale_color_manual(values=ann_colors$growth_fail) +
+    theme_bw() +
+    theme(
+      axis.text=element_blank(),
+      axis.ticks=element_blank(),
+      panel.grid = element_blank(), 
+      aspect.ratio = 1,
+      strip.background = element_blank()
+    ) + 
+    labs(color="", title="Bray-Curtis")
+```
+
+#### Permanova
+
+```{r, results='asis'}
+
+s_permanova <- s_toTest %>%
+  filter(!is.na(feeds_prop_hm))
+
+summaries_df <-
+  s_permanova %>%
+    do(adonisplus(
+      ., distmat = dist_in, formula = distmat ~ npo_days_prop + feeds_prop_hm + AbxHoursPerHOL + timepoint_numeric * growth_cat,
+      sample_id_var = SampleID, rep_meas_var = SubjectID,
+      shuffle = c(growth_failure = "between", timepoint_numeric = "within"), permutations=perm)) %>%
+    ungroup() %>%
+    mutate(metric = "Bray-Curtis") %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(metric, everything())
+
+write_rds(summaries_df, here("Data", "kegg_bc_permanova_results_alldays_2.rds"))
+
+summaries_df <- read_rds(here("Data", "kegg_bc_permanova_results_alldays_2.rds"))
+
+table_export(summaries_df, "gene_analysis_table_")
+
+summaries_df %>%
+  mutate(term = str_replace(term, "timepoint_numeric", "Time")) %>%
+  mutate(term = str_replace(term, "growth_failure", "Growth failure")) %>%
+  pander(split.cells = Inf, digits = 2, emphasize.strong.rows = which(.$p.value<=0.05))
+
+```
+
+### Linear models of pathways
+
+```{r, results='asis'}
+
+number_of_top_pathways = 25
+
+props_toTest <- kegg_path_props %>%
+  mutate(props_log2 = log2(props)) %>%
+  mutate(PathwayName = fct_lump(PathwayName, n = number_of_top_pathways, w = .$props, other_level = "Other")) %>%
+  filter(!PathwayName %in% c("Metabolic pathways", "Other"))
+
+form1 = "props_log2 ~ timepoint_numeric * growth_failure + npo_days_prop + feeds_prop_hm + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "PathwayName", props_toTest = props_toTest, s_toTest = s_toTest, form1 = form1,rep_mes_label = random1, p_cutoff =  0.05) 
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log2 transformed abundances of KEGG pathways"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+table_export(summaries_df, "gene_analysis_table_")
+
+```
+
+#### Boxplot of pathway abundances
+
+```{r}
+
+to_select <- unique(as.character(summaries_df$PathwayName))
+
+number_of_blocks <- ceiling(length(to_select) / 9)
+chunk_it <- function(x,n) split(x, cut(seq_along(x), n, labels = FALSE))
+my_blocks <- chunk_it(to_select, number_of_blocks)
+
+for (i in 1:number_of_blocks) {
+  subset <- my_blocks[[i]]
+
+  props_toTest %>%
+    filter(PathwayName %in% subset) %>%
+    filter(SampleID %in% s_toTest$SampleID) %>%
+    merge(s_toTest, by="SampleID") %>%
+    
+    mutate(PathwayName = reorder(PathwayName, -props)) %>%
+    ggplot(aes(x=growth_failure, y=props, color=growth_failure)) +
+    geom_boxplot(outlier.alpha = 0) +
+    geom_quasirandom(dodge.width = 0.75) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle=45, vjust=1, hjust=1),
+      strip.background = element_blank()) +
+    #scale_color_manual(values=brewer.pal(8, "Set1")[c(2,5,1)]) +
+    scale_color_brewer(palette = "Set2") +
+    scale_y_continuous(trans = "log2") +
+    facet_wrap(~PathwayName, scales="free_y", ncol=3) +
+    labs(x="", color="Growth failure",
+         y="Relative abundance",
+         title = "Pathways in samples that had gene abundance differences")
+  
+  ggsave(here("Output",glue("{current_sub_study}_kegg_pathway_differences_growth_failure_{i}.pdf")), height=7, width=12, useDingbats=F)
+}
+
+```
+
+### KEGG orthologs
+
+Taking the top 500 KEGG orthologs and testing them
+
+```{r message=FALSE, warning=FALSE, paged.print=TRUE, results='asis'}
+
+top500 <- kegg_props %>%
+  filter(SampleID %in% s_toTest$SampleID) %>%
+  group_by(geneID) %>%
+  summarise(mean_props = mean(props)) %>%
+  arrange(desc(mean_props)) %>%
+  slice(1:500)
+
+kegg_props_subset <- kegg_props %>%
+  select(SampleID, Ortholog = geneID, count, props) %>%
+  filter(Ortholog %in% top500$geneID) %>%
+  mutate(props_log2 = log2(props))
+
+form1 = "props_log2 ~ timepoint_numeric * growth_failure + npo_days_prop + feeds_prop_hm + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+# summaries_df <- run_lmer_on_props(factor_to_test = "Ortholog", props_toTest = kegg_props_subset, s_toTest = s_toTest, form1 = form1, p_cutoff = 1, rep_mes_label = random1)
+# 
+# save(summaries_df, file = here("Data", glue("{current_sub_study}_kegg500_changes_gf.RDS")))
+
+load(file = here("Data", glue("{current_sub_study}_kegg500_changes_gf.RDS")))
+
+to_select <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes"), fdr < 0.05, Value > 0) %>%
+  arrange(desc(Value)) %>%
+  slice(1:45) %>%
+  pull(Ortholog) %>%
+  as.character() %>%
+  unique()
+  
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes"), Ortholog %in% to_select) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  mutate(ortho_lable = paste(Ortholog, str_trunc(Definition, 30, "right"))) %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(ortho_lable = fct_reorder(ortho_lable, Value))
+
+g <- ggplot(plot_df, aes(Value, ortho_lable, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c("Not significant" = 1, "p.adj < 0.05" = 19)) +
+  scale_color_manual(values = ann_colors$growth_fail[2]) +
+  labs(y = "Ortholog / Description",
+       x = "<-- Decreased vs. no growth failure    Increased vs. no growth failure -->")
+
+plot(g)
+
+ggsave(here("Output", glue("{current_sub_study}_top_increasing_orthologs_gf.pdf")), height = 7, width = 10)
+
+to_select <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes"), fdr < 0.05, Value < 0) %>%
+  arrange(desc(Value)) %>%
+  slice(1:45) %>%
+  pull(Ortholog) %>%
+  as.character() %>%
+  unique()
+  
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes"), Ortholog %in% to_select) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  mutate(ortho_lable = paste(Ortholog, str_trunc(Definition, 30, "right"))) %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(ortho_lable = fct_reorder(ortho_lable, Value))
+
+g <- ggplot(plot_df, aes(Value, ortho_lable, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c("Not significant" = 1, "p.adj < 0.05" = 19)) +
+  scale_color_manual(values = ann_colors$growth_fail[2]) +
+  labs(y = "Ortholog / Description",
+       x = "<-- Decreased vs. no growth failure    Increased vs. no growth failure -->")
+
+plot(g)
+
+ggsave(here("Output", glue("{current_sub_study}_top_decreasing_orthologs_gf.pdf")), height = 7, width = 10)
+
+table_name <- glue("{current_sub_study}_individual_gene_changes_growth_categories_gf.csv")
+
+my_table <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes"), fdr < 0.05) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  left_join(path_annotation, by = "Ortholog")
+
+write_csv(my_table, here("Output", table_name))
+
+print(glue("All orthologs saved together as {table_name}"))
+
+```
+
+### Butyrate and Aromatic amino acids
+
+#### Linear models
+
+```{r, results='asis'}
+
+props_toTest <- but_ipa %>%
+  mutate(props_log2 = log2(props))
+
+form1 = "props_log2 ~ timepoint_numeric * growth_failure + npo_days_prop + feeds_prop_hm + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+#for whatever reason, I'm getting a "false convergence (8)" error code in nlminb
+
+temp_df <- tibble()
+
+for (selected_gene in unique(but_ipa$geneID)) {
+
+  props_toTest <- but_ipa %>%
+  filter(geneID %in% selected_gene) %>%
+  mutate(props_log2 = log2(props)) %>%
+  inner_join(s_toTest, by = "SampleID")
+
+  possible_error <- try(tiny_df <- tidy_lmer(nlme::lme(as.formula(form1), random = as.formula("~ 1 | SubjectID"), data=props_toTest, na.action=na.omit)) %>% filter(term != '(Intercept)'))
+
+  tiny_df$geneID <- selected_gene
+
+  if (class(possible_error)[1] %in% "try-error") {
+    print(glue("Error with {selected_gene}"))
+    tiny_df <- tibble()
+  }
+
+  temp_df <- bind_rows(temp_df, tiny_df)
+
+}
+
+summaries_df <- temp_df %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() %>%
+  select(geneID, everything())
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(p.value < 0.05) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log2 transformed abundances"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+table_export(summaries_df %>% filter(p.value < 0.05), "gene_analysis_table_")
+
+```
+
+#### Graphing these changes
+
+```{r}
+
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes")) %>%
+  left_join(annot_df, by = "geneID") %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(geneID = fct_reorder(geneID, Value))
+
+g <- ggplot(plot_df, aes(Value, geneID, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c(1,19)) +
+  scale_color_manual(values=ann_colors$growth_fail[2]) +
+  facet_grid(database~"Value", scales = "free_y", space = "free_y") +
+  labs(y = "geneID",
+       x = "<-- Decreased vs. no growth failure    Increased vs. no growth failure -->",
+       color = "Growth failure")
+
+plot(g)
+
+ggsave(here("Output",glue("{current_sub_study}_gene_abundaces_but_ipa_gf.pdf")), height=5, width=8, useDingbats=F)
+
+```
+
+```{r}
+current_sub_study <- "0to21day"
+```
+
+# 0 to 21 day old babies
+
+## Growth faltering
+
+After filtering for > 0 days and < 22 days we are left with these samples per baby:
+
+```{r fig.height=6, fig.width=8}
+
+s_toPlot <- s_toTest <- s2 %>%
+  filter(DOL < 22) %>%
+  droplevels()
+
+my_df <- s_toPlot %>%
+  count(SubjectID) %>%
+  arrange(desc(n)) %>%
+  rename(`Number of samples` = n)
+
+my_df %>%
+  ggplot(aes(x = SubjectID, y = `Number of samples`, fill = `Number of samples`)) +
+  geom_col() +
+  theme_bw() +
+  scale_fill_viridis_c() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1))
+
+glue("With a total of {length(unique(s_toPlot$SubjectID))} babies.")
+
+```
+
+### Bray-curtis PCoA
+
+First, we will examine overall differences using PCoA of the Bray-curtis' distances of the gene abundances between samples.
+
+#### PCoA's
+
+```{r}
+
+dist_in <- usedist::dist_subset(bc_kegg, s_toPlot$SampleID)
+
+ann_colors = list(
+  category = setNames(brewer.pal(length(levels(s_toTest$category)), "Set2"), levels(s_toTest$category)),
+  growth_cat = setNames(as.character(ghibli_palette("YesterdayMedium", direction = -1)[1:length(levels(s_toTest$growth_cat))]), levels(s_toTest$growth_cat)),
+  TimePoint = setNames(viridis(length(levels(s_toTest$TimePoint))), levels(s_toTest$TimePoint)),
+  growth_fail = setNames(qualpal(2)$hex, levels(s_toTest$growth_failure))
+)
+
+```
+
+```{r fig.height=5, fig.width=5}
+s_toPlot %>%
+  pcoaplus(dist_in) %>%
+  plot(color=TimePoint) +
+    scale_color_manual(values=ann_colors$TimePoint) +
+    theme_bw() +
+    theme(
+      axis.text=element_blank(),
+      axis.ticks=element_blank(),
+      panel.grid = element_blank(), 
+      aspect.ratio = 1,
+      strip.background = element_blank()
+    ) + 
+    labs(color="", title="Bray-Curtis")
+```
+
+```{r fig.height=5, fig.width=5}
+s_toPlot %>%
+  pcoaplus(dist_in) %>%
+  plot(color=growth_cat) +
+    scale_color_manual(values=ann_colors$growth_cat) +
+    theme_bw() +
+    theme(
+      axis.text=element_blank(),
+      axis.ticks=element_blank(),
+      panel.grid = element_blank(), 
+      aspect.ratio = 1,
+      strip.background = element_blank()
+    ) + 
+    labs(color="", title="Bray-Curtis")
+```
+
+#### Permanova
+
+```{r, results='asis'}
+
+s_permanova <- s_toTest %>%
+  filter(!is.na(feeds_prop_hm))
+
+summaries_df <-
+  s_permanova %>%
+    do(adonisplus(
+      ., distmat = dist_in, formula = distmat ~ npo_days_prop + feeds_prop_hm + AbxHoursPerHOL + timepoint_numeric * growth_cat,
+      sample_id_var = SampleID, rep_meas_var = SubjectID,
+      shuffle = c(growth_cat = "between", timepoint_numeric = "within"), permutations=perm)) %>%
+    ungroup() %>%
+    mutate(metric = "Bray-Curtis") %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(metric, everything())
+
+write_rds(summaries_df, here("Data", "kegg_bc_permanova_results_0to21days.rds"))
+
+summaries_df <- read_rds(here("Data", "kegg_bc_permanova_results_0to21days.rds"))
+
+summaries_df %>%
+  mutate(term = str_replace(term, "timepoint_numeric", "Time")) %>%
+  mutate(term = str_replace(term, "growth_cat", "Growth category")) %>%
+  pander(split.cells = Inf, digits = 2, emphasize.strong.rows = which(.$p.value<=0.05))
+
+table_export(summaries_df, "gene_analysis_table_")
+
+```
+
+### Linear models of pathways
+
+```{r, results='asis'}
+
+number_of_top_pathways = 25
+
+props_toTest <- kegg_path_props %>%
+  mutate(props_log2 = log2(props)) %>%
+  mutate(PathwayName = fct_lump(PathwayName, n = number_of_top_pathways, w = .$props, other_level = "Other")) %>%
+  filter(!PathwayName %in% c("Metabolic pathways", "Other"))
+
+form1 = "props_log2 ~ timepoint_numeric * growth_cat + npo_days_prop + feeds_prop_hm + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "PathwayName", props_toTest = props_toTest, s_toTest = s_toTest, form1 = form1,rep_mes_label = random1, p_cutoff =  0.05) 
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log2 transformed abundances of KEGG pathways"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+table_export(summaries_df, "gene_analysis_table_")
+
+```
+
+#### Boxplot of pathway abundances
+
+```{r}
+
+to_select <- unique(as.character(summaries_df$PathwayName))
+
+number_of_blocks <- ceiling(length(to_select) / 9)
+chunk_it <- function(x,n) split(x, cut(seq_along(x), n, labels = FALSE))
+my_blocks <- chunk_it(to_select, number_of_blocks)
+
+for (i in 1:number_of_blocks) {
+  subset <- my_blocks[[i]]
+
+  props_toTest %>%
+    filter(PathwayName %in% subset) %>%
+    filter(SampleID %in% s_toTest$SampleID) %>%
+    merge(s_toTest, by="SampleID") %>%
+    
+    mutate(PathwayName = reorder(PathwayName, -props)) %>%
+    ggplot(aes(x=growth_cat, y=props, color=growth_cat)) +
+    geom_boxplot(outlier.alpha = 0) +
+    geom_quasirandom(dodge.width = 0.75) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle=45, vjust=1, hjust=1),
+      strip.background = element_blank()) +
+    #scale_color_manual(values=brewer.pal(8, "Set1")[c(2,5,1)]) +
+    scale_color_brewer(palette = "Set2") +
+    scale_y_continuous(trans = "log2") +
+    facet_wrap(~PathwayName, scales="free_y", ncol=3) +
+    labs(x="", color="growth_cat",
+         y="Relative abundance",
+         title = "Pathways in samples that had gene abundance differences")
+  
+  ggsave(here("Output",glue("{current_sub_study}_kegg_pathway_differences_growth_cat_{i}.pdf")), height=7, width=12, useDingbats=F)
+}
+
+```
+
+### KEGG orthologs
+
+Taking the top 500 KEGG orthologs and testing them
+
+```{r message=FALSE, warning=FALSE, paged.print=TRUE, results='asis'}
+
+top500 <- kegg_props %>%
+  filter(SampleID %in% s_toTest$SampleID) %>%
+  group_by(geneID) %>%
+  summarise(mean_props = mean(props)) %>%
+  arrange(desc(mean_props)) %>%
+  slice(1:500)
+
+kegg_props_subset <- kegg_props %>%
+  select(SampleID, Ortholog = geneID, count, props) %>%
+  filter(Ortholog %in% top500$geneID) %>%
+  mutate(props_log2 = log2(props))
+
+form1 = "props_log2 ~ timepoint_numeric * growth_cat + npo_days_prop + feeds_prop_hm + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+# summaries_df <- run_lmer_on_props(factor_to_test = "Ortholog", props_toTest = kegg_props_subset, s_toTest = s_toTest, form1 = form1, p_cutoff = 1, rep_mes_label = random1)
+# 
+# save(summaries_df, file = here("Data", glue("{current_sub_study}_kegg500_changes.RDS")))
+
+load(file = here("Data", glue("{current_sub_study}_kegg500_changes.RDS")))
+
+to_select <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), fdr < 0.05, Value > 0) %>%
+  arrange(desc(Value)) %>%
+  slice(1:45) %>%
+  pull(Ortholog) %>%
+  as.character() %>%
+  unique()
+#actually top 32
+  
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), Ortholog %in% to_select) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  mutate(ortho_lable = paste(Ortholog, str_trunc(Definition, 30, "right"))) %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(ortho_lable = fct_reorder(ortho_lable, Value))
+
+g <- ggplot(plot_df, aes(Value, ortho_lable, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c(1,19)) +
+  scale_color_manual(values=ann_colors$growth_cat[2:3]) +
+  labs(y = "Ortholog / Description",
+       x = "<-- Decreased vs. normal growth    Increased vs. normal growth -->",
+       color = "Growth category")
+
+plot(g)
+
+ggsave(here("Output", glue("{current_sub_study}_top_increasing_orthologs.pdf")), height = 7, width = 10)
+
+to_select <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), fdr < 0.05, Value < 0) %>%
+  arrange(desc(Value)) %>%
+  slice(1:45) %>%
+  pull(Ortholog) %>%
+  as.character() %>%
+  unique()
+#actually top 32
+  
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), Ortholog %in% to_select) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  mutate(ortho_lable = paste(Ortholog, str_trunc(Definition, 30, "right"))) %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(ortho_lable = fct_reorder(ortho_lable, Value))
+
+g <- ggplot(plot_df, aes(Value, ortho_lable, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c(1,19)) +
+  scale_color_manual(values=ann_colors$growth_cat[2:3]) +
+  labs(y = "Ortholog / Description",
+       x = "<-- Decreased vs. normal growth    Increased vs. normal growth -->",
+       color = "Growth category")
+
+plot(g)
+
+ggsave(here("Output", glue("{current_sub_study}_top_decreasing_orthologs.pdf")), height = 7, width = 10)
+
+table_name <- glue("{current_sub_study}_individual_gene_changes_growth_categories.csv")
+
+my_table <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), fdr < 0.05) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  left_join(path_annotation, by = "Ortholog")
+
+write_csv(my_table, here("Output", table_name))
+
+print(glue("All orthologs saved together as {table_name}"))
+
+```
+
+### Butyrate and Aromatic amino acids
+
+#### Linear models
+
+```{r, results='asis'}
+
+props_toTest <- but_ipa %>%
+  mutate(props_log2 = log2(props))
+
+form1 = "props_log2 ~ timepoint_numeric * growth_cat + npo_days_prop + feeds_prop_hm + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+#for whatever reason, I'm getting a "false convergence (8)" error code in nlminb
+
+temp_df <- tibble()
+
+for (selected_gene in unique(but_ipa$geneID)) {
+
+  props_toTest <- but_ipa %>%
+  filter(geneID %in% selected_gene) %>%
+  mutate(props_log2 = log2(props)) %>%
+  inner_join(s_toTest, by = "SampleID")
+
+  possible_error <- try(tiny_df <- tidy_lmer(nlme::lme(as.formula(form1), random = as.formula("~ 1 | SubjectID"), data=props_toTest, na.action=na.omit)) %>% filter(term != '(Intercept)'))
+
+  tiny_df$geneID <- selected_gene
+
+  if (class(possible_error)[1] %in% "try-error") {
+    print(glue("Error with {selected_gene}"))
+    tiny_df <- tibble()
+  }
+
+  temp_df <- bind_rows(temp_df, tiny_df)
+
+}
+
+summaries_df <- temp_df %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() %>%
+  select(geneID, everything())
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(p.value < 0.05) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log2 transformed abundances"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+table_export(summaries_df %>% filter(p.value < 0.05), "gene_analysis_table_")
+
+```
+
+#### Graphing these changes
+
+```{r}
+
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation")) %>%
+  left_join(annot_df, by = "geneID") %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(geneID = fct_reorder(geneID, Value))
+
+g <- ggplot(plot_df, aes(Value, geneID, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c(1,19)) +
+  scale_color_manual(values=ann_colors$growth_cat[2:3]) +
+  facet_grid(database~"Value", scales = "free_y", space = "free_y") +
+  labs(y = "geneID",
+       x = "<-- Decreased vs. normal growth    Increased vs. normal growth -->",
+       color = "Growth category")
+
+plot(g)
+
+ggsave(here("Output",glue("{current_sub_study}_gene_abundaces_but_ipa.pdf")), height=5, width=8, useDingbats=F)
+
+```
+
+## Growth failure
+
+Growth failure is now those babies who are the bottom 3rd percentile in terms of normal growth.
+
+### Bray-curtis PCoA
+
+First, we will examine overall differences using PCoA of the Bray-curtis' distances of the gene abundances between samples.
+
+#### PCoA's
+
+```{r fig.height=5, fig.width=5}
+s_toPlot %>%
+  pcoaplus(dist_in) %>%
+  plot(color=growth_failure) +
+    scale_color_manual(values=ann_colors$growth_fail) +
+    theme_bw() +
+    theme(
+      axis.text=element_blank(),
+      axis.ticks=element_blank(),
+      panel.grid = element_blank(), 
+      aspect.ratio = 1,
+      strip.background = element_blank()
+    ) + 
+    labs(color="", title="Bray-Curtis")
+```
+
+#### Permanova
+
+```{r, results='asis'}
+
+s_permanova <- s_toTest %>%
+  filter(!is.na(feeds_prop_hm))
+
+summaries_df <-
+  s_permanova %>%
+    do(adonisplus(
+      ., distmat = dist_in, formula = distmat ~ npo_days_prop + feeds_prop_hm + AbxHoursPerHOL + timepoint_numeric * growth_cat,
+      sample_id_var = SampleID, rep_meas_var = SubjectID,
+      shuffle = c(growth_failure = "between", timepoint_numeric = "within"), permutations=perm)) %>%
+    ungroup() %>%
+    mutate(metric = "Bray-Curtis") %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(metric, everything())
+
+write_rds(summaries_df, here("Data", "kegg_bc_permanova_results_0to21days_2.rds"))
+
+summaries_df <- read_rds(here("Data", "kegg_bc_permanova_results_0to21days_2.rds"))
+
+table_export(summaries_df, "gene_analysis_table_")
+
+summaries_df %>%
+  mutate(term = str_replace(term, "timepoint_numeric", "Time")) %>%
+  mutate(term = str_replace(term, "growth_failure", "Growth failure")) %>%
+  pander(split.cells = Inf, digits = 2, emphasize.strong.rows = which(.$p.value<=0.05))
+
+```
+
+### Linear models of pathways
+
+```{r, results='asis'}
+
+number_of_top_pathways = 25
+
+props_toTest <- kegg_path_props %>%
+  mutate(props_log2 = log2(props)) %>%
+  mutate(PathwayName = fct_lump(PathwayName, n = number_of_top_pathways, w = .$props, other_level = "Other")) %>%
+  filter(!PathwayName %in% c("Metabolic pathways", "Other"))
+
+form1 = "props_log2 ~ timepoint_numeric * growth_failure + npo_days_prop + feeds_prop_hm + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "PathwayName", props_toTest = props_toTest, s_toTest = s_toTest, form1 = form1,rep_mes_label = random1, p_cutoff =  0.05) 
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log2 transformed abundances of KEGG pathways"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+table_export(summaries_df, "gene_analysis_table_")
+
+```
+
+#### Boxplot of pathway abundances
+
+```{r}
+
+to_select <- unique(as.character(summaries_df$PathwayName))
+
+number_of_blocks <- ceiling(length(to_select) / 9)
+chunk_it <- function(x,n) split(x, cut(seq_along(x), n, labels = FALSE))
+my_blocks <- chunk_it(to_select, number_of_blocks)
+
+for (i in 1:number_of_blocks) {
+  subset <- my_blocks[[i]]
+
+  props_toTest %>%
+    filter(PathwayName %in% subset) %>%
+    filter(SampleID %in% s_toTest$SampleID) %>%
+    merge(s_toTest, by="SampleID") %>%
+    
+    mutate(PathwayName = reorder(PathwayName, -props)) %>%
+    ggplot(aes(x=growth_failure, y=props, color=growth_failure)) +
+    geom_boxplot(outlier.alpha = 0) +
+    geom_quasirandom(dodge.width = 0.75) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle=45, vjust=1, hjust=1),
+      strip.background = element_blank()) +
+    #scale_color_manual(values=brewer.pal(8, "Set1")[c(2,5,1)]) +
+    scale_color_brewer(palette = "Set2") +
+    scale_y_continuous(trans = "log2") +
+    facet_wrap(~PathwayName, scales="free_y", ncol=3) +
+    labs(x="", color="Growth failure",
+         y="Relative abundance",
+         title = "Pathways in samples that had gene abundance differences")
+  
+  ggsave(here("Output",glue("{current_sub_study}_kegg_pathway_differences_growth_failure_{i}.pdf")), height=7, width=12, useDingbats=F)
+}
+
+```
+
+### KEGG orthologs
+
+Taking the top 500 KEGG orthologs and testing them
+
+```{r message=FALSE, warning=FALSE, paged.print=TRUE, results='asis'}
+
+top500 <- kegg_props %>%
+  filter(SampleID %in% s_toTest$SampleID) %>%
+  group_by(geneID) %>%
+  summarise(mean_props = mean(props)) %>%
+  arrange(desc(mean_props)) %>%
+  slice(1:500)
+
+kegg_props_subset <- kegg_props %>%
+  select(SampleID, Ortholog = geneID, count, props) %>%
+  filter(Ortholog %in% top500$geneID) %>%
+  mutate(props_log2 = log2(props))
+
+form1 = "props_log2 ~ timepoint_numeric * growth_failure + npo_days_prop + feeds_prop_hm + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+# summaries_df <- run_lmer_on_props(factor_to_test = "Ortholog", props_toTest = kegg_props_subset, s_toTest = s_toTest, form1 = form1, p_cutoff = 1, rep_mes_label = random1)
+# 
+# save(summaries_df, file = here("Data", glue("{current_sub_study}_kegg500_changes_gf.RDS")))
+
+load(file = here("Data", glue("{current_sub_study}_kegg500_changes_gf.RDS")))
+
+to_select <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes"), fdr < 0.05, Value > 0) %>%
+  arrange(desc(Value)) %>%
+  slice(1:45) %>%
+  pull(Ortholog) %>%
+  as.character() %>%
+  unique()
+  
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes"), Ortholog %in% to_select) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  mutate(ortho_lable = paste(Ortholog, str_trunc(Definition, 30, "right"))) %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(ortho_lable = fct_reorder(ortho_lable, Value))
+
+g <- ggplot(plot_df, aes(Value, ortho_lable, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c("Not significant" = 1, "p.adj < 0.05" = 19)) +
+  scale_color_manual(values = ann_colors$growth_fail[2]) +
+  labs(y = "Ortholog / Description",
+       x = "<-- Decreased vs. no growth failure    Increased vs. no growth failure -->")
+
+plot(g)
+
+ggsave(here("Output", glue("{current_sub_study}_top_increasing_orthologs_gf.pdf")), height = 7, width = 10)
+
+to_select <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes"), fdr < 0.05, Value < 0) %>%
+  arrange(desc(Value)) %>%
+  slice(1:45) %>%
+  pull(Ortholog) %>%
+  as.character() %>%
+  unique()
+  
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes"), Ortholog %in% to_select) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  mutate(ortho_lable = paste(Ortholog, str_trunc(Definition, 30, "right"))) %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(ortho_lable = fct_reorder(ortho_lable, Value))
+
+g <- ggplot(plot_df, aes(Value, ortho_lable, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c("Not significant" = 1, "p.adj < 0.05" = 19)) +
+  scale_color_manual(values = ann_colors$growth_fail[2]) +
+  labs(y = "Ortholog / Description",
+       x = "<-- Decreased vs. no growth failure    Increased vs. no growth failure -->")
+
+plot(g)
+
+ggsave(here("Output", glue("{current_sub_study}_top_decreasing_orthologs_gf.pdf")), height = 7, width = 10)
+
+table_name <- glue("{current_sub_study}_individual_gene_changes_growth_categories_gf.csv")
+
+my_table <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes"), fdr < 0.05) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  left_join(path_annotation, by = "Ortholog")
+
+write_csv(my_table, here("Output", table_name))
+
+print(glue("All orthologs saved together as {table_name}"))
+
+```
+
+### Butyrate and Aromatic amino acids
+
+#### Linear models
+
+```{r, results='asis'}
+
+props_toTest <- but_ipa %>%
+  mutate(props_log2 = log2(props))
+
+form1 = "props_log2 ~ timepoint_numeric * growth_failure + npo_days_prop + feeds_prop_hm + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+#for whatever reason, I'm getting a "false convergence (8)" error code in nlminb
+
+temp_df <- tibble()
+
+for (selected_gene in unique(but_ipa$geneID)) {
+
+  props_toTest <- but_ipa %>%
+  filter(geneID %in% selected_gene) %>%
+  mutate(props_log2 = log2(props)) %>%
+  inner_join(s_toTest, by = "SampleID")
+
+  possible_error <- try(tiny_df <- tidy_lmer(nlme::lme(as.formula(form1), random = as.formula("~ 1 | SubjectID"), data=props_toTest, na.action=na.omit)) %>% filter(term != '(Intercept)'))
+
+  tiny_df$geneID <- selected_gene
+
+  if (class(possible_error)[1] %in% "try-error") {
+    print(glue("Error with {selected_gene}"))
+    tiny_df <- tibble()
+  }
+
+  temp_df <- bind_rows(temp_df, tiny_df)
+
+}
+
+summaries_df <- temp_df %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() %>%
+  select(geneID, everything())
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(p.value < 0.05) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log2 transformed abundances"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+table_export(summaries_df %>% filter(p.value < 0.05), "gene_analysis_table_")
+
+```
+
+#### Graphing these changes
+
+```{r}
+
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes")) %>%
+  left_join(annot_df, by = "geneID") %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(geneID = fct_reorder(geneID, Value))
+
+g <- ggplot(plot_df, aes(Value, geneID, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c(1,19)) +
+  scale_color_manual(values=ann_colors$growth_fail[2]) +
+  facet_grid(database~"Value", scales = "free_y", space = "free_y") +
+  labs(y = "geneID",
+       x = "<-- Decreased vs. no growth failure    Increased vs. no growth failure -->",
+       color = "Growth failure")
+
+plot(g)
+
+ggsave(here("Output",glue("{current_sub_study}_gene_abundaces_but_ipa_gf.pdf")), height=5, width=8, useDingbats=F)
+
+```
+
+
+```{r}
+current_sub_study <- "34to37weeks"
+```
+
+# Post-menstrual age > 34 weeks and < 37 weeks
+
+In this section, all of the statistics that include day-of-life (DOL) or hour-of-life (HOL) will instead be analyzed using post-menstrual age (PMA) which is equal to `Gestation in Weeks + (DOL/7)`. We are also going to restrict the analysis to less than 37 weeks and greater than 34 weeks with one sample per baby.
+
+```{r}
+
+s2 %<>%
+  mutate(PMA = (DOL/7) + Gestation)
+
+s2 %>%
+  ggplot(aes(x = PMA, fill = WOL_label)) +
+  geom_histogram(binwidth = 1, center = 0) +
+  geom_vline(xintercept = 36, lty = 2) +
+  labs(caption = "Dashed line represents 36 weeks PMA")
+
+# check
+# s2 %>%
+#   filter(PMA > 36) %>%
+#   select(SampleID, Zdec36_gt0.8, Zdec36_gt1.2, Zdec36_gt2, growth_cat) %>%
+#   view()
+
+```
+
+Subset:
+
+```{r}
+
+s_subset2 <- read_rds(here("Data", "subset_of_babies_great34wk_less37wk.rds"))
+
+```
+
+After filtering for > 34 weeks and < 37 weeks PMA we are left with these samples per baby:
+
+```{r fig.height=6, fig.width=8}
+
+s_toPlot <- s_toTest <- s2 %>%
+  filter(SampleID %in% s_subset2$SampleID) %>%
+  droplevels()
+
+#subsetting timepoint colors for nicer legends
+ann_colors = list(
+  category = setNames(brewer.pal(length(levels(s_toTest$category)), "Set2"), levels(s_toTest$category)),
+  growth_cat = setNames(as.character(ghibli_palette("YesterdayMedium", direction = -1)[1:length(levels(s_toTest$growth_cat))]), levels(s_toTest$growth_cat)),
+  TimePoint = setNames(viridis(length(levels(s_toTest$TimePoint))), levels(s_toTest$TimePoint)),
+  growth_fail = setNames(qualpal(2)$hex, levels(s_toTest$growth_failure))
+)
+ann_colors$TimePoint <- ann_colors$TimePoint[names(ann_colors$TimePoint) %in% unique(s_toPlot$TimePoint)]
+
+my_df <- s_toPlot %>%
+  count(SubjectID) %>%
+  arrange(desc(n)) %>%
+  rename(`Number of samples` = n)
+
+my_df %>%
+  ggplot(aes(x = SubjectID, y = `Number of samples`, fill = `Number of samples`)) +
+  geom_col() +
+  theme_bw() +
+  scale_fill_viridis_c() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 1))
+
+glue("With a total of {length(unique(s_toPlot$SubjectID))} babies.")
+
+```
+
+## Growth faltering
+
+### Bray-curtis PCoA
+
+First, we will examine overall differences using PCoA of the Bray-curtis' distances of the gene abundances between samples.
+
+#### PCoA's
+
+```{r}
+
+dist_in <- usedist::dist_subset(bc_kegg, s_toPlot$SampleID)
+
+```
+
+```{r fig.height=5, fig.width=5}
+s_toPlot %>%
+  pcoaplus(dist_in) %>%
+  plot(color=TimePoint) +
+    scale_color_manual(values=ann_colors$TimePoint) +
+    theme_bw() +
+    theme(
+      axis.text=element_blank(),
+      axis.ticks=element_blank(),
+      panel.grid = element_blank(), 
+      aspect.ratio = 1,
+      strip.background = element_blank()
+    ) + 
+    labs(color="", title="Bray-Curtis")
+```
+
+```{r fig.height=5, fig.width=5}
+s_toPlot %>%
+  pcoaplus(dist_in) %>%
+  plot(color=growth_cat) +
+    scale_color_manual(values=ann_colors$growth_cat) +
+    theme_bw() +
+    theme(
+      axis.text=element_blank(),
+      axis.ticks=element_blank(),
+      panel.grid = element_blank(), 
+      aspect.ratio = 1,
+      strip.background = element_blank()
+    ) + 
+    labs(color="", title="Bray-Curtis")
+```
+
+#### Permanova
+
+```{r, results='asis'}
+s_permanova <- s_toTest %>%
+  filter(!is.na(feeds_prop_hm))
+
+summaries_df <-
+  s_permanova %>%
+    do(adonisplus(
+      ., distmat = dist_in, formula = distmat ~ npo_days_prop + feeds_prop_hm + AbxHoursPerHOL + timepoint_numeric * growth_cat,
+      sample_id_var = SampleID, rep_meas_var = SubjectID,
+      shuffle = c(growth_cat = "between", timepoint_numeric = "within"), permutations=perm)) %>%
+    ungroup() %>%
+    mutate(metric = "Bray-Curtis") %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(metric, everything())
+
+write_rds(summaries_df, here("Data", "kegg_bc_permanova_results_34to37weeks.rds"))
+
+summaries_df <- read_rds(here("Data", "kegg_bc_permanova_results_34to37weeks.rds"))
+
+summaries_df %>%
+  mutate(term = str_replace(term, "timepoint_numeric", "Time")) %>%
+  mutate(term = str_replace(term, "growth_cat", "Growth category")) %>%
+  pander(split.cells = Inf, digits = 2, emphasize.strong.rows = which(.$p.value<=0.05))
+
+table_export(summaries_df, "gene_analysis_table_")
+
+```
+
+### Linear models of pathways
+
+```{r, results='asis'}
+
+number_of_top_pathways = 25
+
+props_toTest <- kegg_path_props %>%
+  mutate(props_log2 = log2(props)) %>%
+  mutate(PathwayName = fct_lump(PathwayName, n = number_of_top_pathways, w = .$props, other_level = "Other")) %>%
+  filter(!PathwayName %in% c("Metabolic pathways", "Other"))
+
+form1 = "props_log2 ~ timepoint_numeric * growth_cat + npo_days_prop + feeds_prop_hm + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "PathwayName", props_toTest = props_toTest, s_toTest = s_toTest, form1 = form1,rep_mes_label = random1, p_cutoff =  0.05) 
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log2 transformed abundances of KEGG pathways"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+table_export(summaries_df, "gene_analysis_table_")
+
+```
+
+#### Boxplot of pathway abundances
+
+```{r}
+
+to_select <- unique(as.character(summaries_df$PathwayName))
+
+number_of_blocks <- ceiling(length(to_select) / 9)
+chunk_it <- function(x,n) split(x, cut(seq_along(x), n, labels = FALSE))
+my_blocks <- chunk_it(to_select, number_of_blocks)
+
+for (i in 1:number_of_blocks) {
+  subset <- my_blocks[[i]]
+
+  props_toTest %>%
+    filter(PathwayName %in% subset) %>%
+    filter(SampleID %in% s_toTest$SampleID) %>%
+    merge(s_toTest, by="SampleID") %>%
+    
+    mutate(PathwayName = reorder(PathwayName, -props)) %>%
+    ggplot(aes(x=growth_cat, y=props, color=growth_cat)) +
+    geom_boxplot(outlier.alpha = 0) +
+    geom_quasirandom(dodge.width = 0.75) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle=45, vjust=1, hjust=1),
+      strip.background = element_blank()) +
+    #scale_color_manual(values=brewer.pal(8, "Set1")[c(2,5,1)]) +
+    scale_color_brewer(palette = "Set2") +
+    scale_y_continuous(trans = "log2") +
+    facet_wrap(~PathwayName, scales="free_y", ncol=3) +
+    labs(x="", color="growth_cat",
+         y="Relative abundance",
+         title = "Pathways in samples that had gene abundance differences")
+  
+  ggsave(here("Output",glue("{current_sub_study}_kegg_pathway_differences_growth_cat_{i}.pdf")), height=7, width=12, useDingbats=F)
+}
+
+```
+
+#### Those that changed
+
+```{r}
+
+pathways_to_select <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation")) %>%
+  pull(PathwayName) %>%
+  unique()
+
+summaries_df <- run_lmer_on_props(factor_to_test = "PathwayName", props_toTest = props_toTest, s_toTest = s_toTest, form1 = form1,rep_mes_label = random1, p_cutoff =  1)
+
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), PathwayName %in% pathways_to_select) %>%
+  mutate(term = ifelse(term %in% "mild retardation", "mild", term)) %>%
+  mutate(term = ifelse(term %in% "moderate to severe retardation", "moderate to\nsevere", term)) %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(PathwayName = fct_reorder(PathwayName, Value))
+
+
+
+g <- ggplot(plot_df, aes(Value, PathwayName, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c(1,19)) +
+  scale_color_manual(values=c(`mild` = "#DCCA2CFF", `moderate to\nsevere` = "#6FB382FF"
+)) +
+  labs(y = "KEGG Pathway",
+       x = "<-- Decreased vs. normal growth    Increased vs. normal growth -->",
+       color = "Growth faltering")
+
+plot(g)
+
+ggsave(here("Output", glue("{current_sub_study}_kegg_pathway_pvalue_graph.pdf")), height = 3, width = 6)
+
+```
+
+### KEGG orthologs
+
+Taking the top 500 KEGG orthologs and testing them
+
+```{r message=FALSE, warning=FALSE, paged.print=TRUE, results='asis'}
+
+top500 <- kegg_props %>%
+  filter(SampleID %in% s_toTest$SampleID) %>%
+  group_by(geneID) %>%
+  summarise(mean_props = mean(props)) %>%
+  arrange(desc(mean_props)) %>%
+  slice(1:500)
+
+kegg_props_subset <- kegg_props %>%
+  select(SampleID, Ortholog = geneID, count, props) %>%
+  filter(Ortholog %in% top500$geneID) %>%
+  mutate(props_log2 = log2(props))
+
+form1 = "props_log2 ~ timepoint_numeric * growth_cat + npo_days_prop + feeds_prop_hm + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+#for whatever reason, I'm getting a "system is computationally singular: reciprocal condition number = 1.74397e-46" error code in nlme
+
+# temp_df <- tibble()
+# 
+# for (kegg_gene in top500$geneID) {
+# 
+#   props_toTest <- kegg_props %>%
+#   filter(geneID %in% kegg_gene) %>%
+#   mutate(props_log2 = log2(props)) %>%
+#   inner_join(s_toTest, by = "SampleID")
+# 
+#   possible_error <- try(tiny_df <- tidy_lmer(nlme::lme(as.formula(form1), random = as.formula("~ 1 | SubjectID"), data=props_toTest, na.action=na.omit)) %>% filter(term != '(Intercept)'))
+# 
+#   tiny_df$geneID <- kegg_gene
+# 
+#   if (class(possible_error)[1] %in% "try-error") {
+#     tiny_df <- tibble()
+#   }
+# 
+#   temp_df <- bind_rows(temp_df, tiny_df)
+# 
+# }
+# 
+# summaries_df <- temp_df %>%
+#   group_by(term) %>%
+#   mutate(fdr = p.adjust(p.value, method="BH")) %>%
+#   ungroup() %>%
+#   select(Ortholog = geneID, everything())
+# 
+# save(summaries_df, file = here("Data", glue("{current_sub_study}_kegg500_changes.RDS")))
+
+load(file = here("Data", glue("{current_sub_study}_kegg500_changes.RDS")))
+
+to_select <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), fdr < 0.05, Value > 0) %>%
+  arrange(desc(Value)) %>%
+  slice(1:45) %>%
+  pull(Ortholog) %>%
+  as.character() %>%
+  unique()
+  
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), Ortholog %in% to_select) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  mutate(ortho_lable = paste(Ortholog, str_trunc(Definition, 30, "right"))) %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(ortho_lable = fct_reorder(ortho_lable, Value))
+
+g <- ggplot(plot_df, aes(Value, ortho_lable, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c(1,19)) +
+  scale_color_manual(values=ann_colors$growth_cat[2:3]) +
+  labs(y = "Ortholog / Description",
+       x = "<-- Decreased vs. normal growth    Increased vs. normal growth -->",
+       color = "Growth category")
+
+plot(g)
+
+ggsave(here("Output", glue("{current_sub_study}_top_increasing_orthologs.pdf")), height = 7, width = 10)
+
+to_select <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), fdr < 0.05, Value < 0) %>%
+  arrange(desc(Value)) %>%
+  slice(1:45) %>%
+  pull(Ortholog) %>%
+  as.character() %>%
+  unique()
+  
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), Ortholog %in% to_select) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  mutate(ortho_lable = paste(Ortholog, str_trunc(Definition, 30, "right"))) %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(ortho_lable = fct_reorder(ortho_lable, Value))
+
+g <- ggplot(plot_df, aes(Value, ortho_lable, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c(1,19)) +
+  scale_color_manual(values=ann_colors$growth_cat[2:3]) +
+  labs(y = "Ortholog / Description",
+       x = "<-- Decreased vs. normal growth    Increased vs. normal growth -->",
+       color = "Growth category")
+
+plot(g)
+
+ggsave(here("Output", glue("{current_sub_study}_top_decreasing_orthologs.pdf")), height = 7, width = 10)
+
+table_name <- glue("{current_sub_study}_individual_gene_changes_growth_categories.csv")
+
+my_table <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), fdr < 0.05) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  left_join(path_annotation, by = "Ortholog")
+
+write_csv(my_table, here("Output", table_name))
+
+print(glue("All orthologs saved together as {table_name}"))
+
+```
+
+#### Combined graph
+
+```{r}
+
+to_select <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), fdr < 0.05) %>%
+  arrange(desc(fdr)) %>%
+  slice(1:45) %>%
+  pull(Ortholog) %>%
+  as.character() %>%
+  unique()
+  
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), Ortholog %in% to_select) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  mutate(ortho_lable = paste(Ortholog, str_trunc(Definition, 30, "right"))) %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(ortho_lable = fct_reorder(ortho_lable, Value))
+
+g <- ggplot(plot_df, aes(Value, ortho_lable, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c(1,19)) +
+  scale_color_manual(values=ann_colors$growth_cat[2:3]) +
+  labs(y = "Ortholog / Description",
+       x = "<-- Decreased vs. normal growth    Increased vs. normal growth -->",
+       color = "Growth category")
+
+plot(g)
+
+ggsave(here("Output", glue("{current_sub_study}_top_changing_orthologs.pdf")), height = 7, width = 10)
+
+```
+
+
+### Butyrate and Aromatic amino acids
+
+#### Linear models
+
+```{r, results='asis'}
+
+props_toTest <- but_ipa %>%
+  mutate(props_log2 = log2(props))
+
+form1 = "props_log2 ~ timepoint_numeric * growth_cat + npo_days_prop + feeds_prop_hm + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+#for whatever reason, I'm getting a "false convergence (8)" error code in nlminb
+
+temp_df <- tibble()
+
+for (selected_gene in unique(but_ipa$geneID)) {
+
+  props_toTest <- but_ipa %>%
+  filter(geneID %in% selected_gene) %>%
+  mutate(props_log2 = log2(props)) %>%
+  inner_join(s_toTest, by = "SampleID")
+
+  possible_error <- try(tiny_df <- tidy_lmer(nlme::lme(as.formula(form1), random = as.formula("~ 1 | SubjectID"), data=props_toTest, na.action=na.omit)) %>% filter(term != '(Intercept)'))
+
+  tiny_df$geneID <- selected_gene
+
+  if (class(possible_error)[1] %in% "try-error") {
+    print(glue("Error with {selected_gene}"))
+    tiny_df <- tibble()
+  }
+
+  temp_df <- bind_rows(temp_df, tiny_df)
+
+}
+
+summaries_df <- temp_df %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() %>%
+  select(geneID, everything())
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(p.value < 0.05) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log2 transformed abundances"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+table_export(summaries_df %>% filter(p.value < 0.05), "gene_analysis_table_")
+
+```
+
+#### Graphing these changes
+
+```{r}
+
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation")) %>%
+  left_join(annot_df, by = "geneID") %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(geneID = fct_reorder(geneID, Value))
+
+g <- ggplot(plot_df, aes(Value, geneID, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c(1,19)) +
+  scale_color_manual(values=ann_colors$growth_cat[2:3]) +
+  facet_grid(database~"Value", scales = "free_y", space = "free_y") +
+  labs(y = "geneID",
+       x = "<-- Decreased vs. normal growth    Increased vs. normal growth -->",
+       color = "Growth category")
+
+plot(g)
+
+ggsave(here("Output",glue("{current_sub_study}_gene_abundaces_but_ipa.pdf")), height=5, width=8, useDingbats=F)
+
+```
+
+
+## Growth failure
+
+Growth failure is now those babies who are the bottom 3rd percentile in terms of normal growth.
+
+### Bray-curtis PCoA
+
+First, we will examine overall differences using PCoA of the Bray-curtis' distances of the gene abundances between samples.
+
+#### PCoA's
+
+```{r fig.height=5, fig.width=5}
+s_toPlot %>%
+  pcoaplus(bc_kegg) %>%
+  plot(color=growth_failure) +
+    scale_color_manual(values=ann_colors$growth_fail) +
+    theme_bw() +
+    theme(
+      axis.text=element_blank(),
+      axis.ticks=element_blank(),
+      panel.grid = element_blank(), 
+      aspect.ratio = 1,
+      strip.background = element_blank()
+    ) + 
+    labs(color="", title="Bray-Curtis")
+```
+
+#### Permanova
+
+```{r, results='asis'}
+s_permanova <- s_toTest %>%
+  filter(!is.na(feeds_prop_hm))
+
+summaries_df <-
+  s_permanova %>%
+    do(adonisplus(
+      ., distmat = dist_in, formula = distmat ~ npo_days_prop + feeds_prop_hm + AbxHoursPerHOL + timepoint_numeric * growth_cat,
+      sample_id_var = SampleID, rep_meas_var = SubjectID,
+      shuffle = c(growth_failure = "between", timepoint_numeric = "within"), permutations=perm)) %>%
+    ungroup() %>%
+    mutate(metric = "Bray-Curtis") %>%
+  filter(!term %in% c("Residual", "Total")) %>%
+  select(metric, everything())
+
+write_rds(summaries_df, here("Data", "kegg_bc_permanova_results_34to37weeks_gf.rds"))
+
+summaries_df <- read_rds(here("Data", "kegg_bc_permanova_results_34to37weeks_gf.rds"))
+
+table_export(summaries_df, "gene_analysis_table_")
+
+summaries_df %>%
+  mutate(term = str_replace(term, "timepoint_numeric", "Time")) %>%
+  mutate(term = str_replace(term, "growth_failure", "Growth failure")) %>%
+  pander(split.cells = Inf, digits = 2, emphasize.strong.rows = which(.$p.value<=0.05))
+
+```
+
+### Linear models of pathways
+
+```{r, results='asis'}
+
+number_of_top_pathways = 25
+
+props_toTest <- kegg_path_props %>%
+  mutate(props_log2 = log2(props)) %>%
+  mutate(PathwayName = fct_lump(PathwayName, n = number_of_top_pathways, w = .$props, other_level = "Other")) %>%
+  filter(!PathwayName %in% c("Metabolic pathways", "Other"))
+
+form1 = "props_log2 ~ timepoint_numeric * growth_failure + npo_days_prop + feeds_prop_hm + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "PathwayName", props_toTest = props_toTest, s_toTest = s_toTest, form1 = form1,rep_mes_label = random1, p_cutoff =  0.05) 
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log2 transformed abundances of KEGG pathways"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+table_export(summaries_df, "gene_analysis_table_")
+
+```
+
+#### Boxplot of pathway abundances
+
+```{r}
+
+to_select <- unique(as.character(summaries_df$PathwayName))
+
+number_of_blocks <- ceiling(length(to_select) / 9)
+chunk_it <- function(x,n) split(x, cut(seq_along(x), n, labels = FALSE))
+my_blocks <- chunk_it(to_select, number_of_blocks)
+
+for (i in 1:number_of_blocks) {
+  subset <- my_blocks[[i]]
+
+  props_toTest %>%
+    filter(PathwayName %in% subset) %>%
+    filter(SampleID %in% s_toTest$SampleID) %>%
+    merge(s_toTest, by="SampleID") %>%
+    
+    mutate(PathwayName = reorder(PathwayName, -props)) %>%
+    ggplot(aes(x=growth_failure, y=props, color=growth_failure)) +
+    geom_boxplot(outlier.alpha = 0) +
+    geom_quasirandom(dodge.width = 0.75) +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle=45, vjust=1, hjust=1),
+      strip.background = element_blank()) +
+    #scale_color_manual(values=brewer.pal(8, "Set1")[c(2,5,1)]) +
+    scale_color_brewer(palette = "Set2") +
+    scale_y_continuous(trans = "log2") +
+    facet_wrap(~PathwayName, scales="free_y", ncol=3) +
+    labs(x="", color="Growth failure",
+         y="Relative abundance",
+         title = "Pathways in samples that had gene abundance differences")
+  
+  ggsave(here("Output",glue("{current_sub_study}_kegg_pathway_differences_growth_failure_{i}.pdf")), height=7, width=12, useDingbats=F)
+}
+
+```
+
+### KEGG orthologs
+
+Taking the top 500 KEGG orthologs and testing them
+
+```{r message=FALSE, warning=FALSE, paged.print=TRUE, results='asis'}
+
+top500 <- kegg_props %>%
+  filter(SampleID %in% s_toTest$SampleID) %>%
+  group_by(geneID) %>%
+  summarise(mean_props = mean(props)) %>%
+  arrange(desc(mean_props)) %>%
+  slice(1:500)
+
+kegg_props_subset <- kegg_props %>%
+  select(SampleID, Ortholog = geneID, count, props) %>%
+  filter(Ortholog %in% top500$geneID) %>%
+  mutate(props_log2 = log2(props))
+
+form1 = "props_log2 ~ timepoint_numeric * growth_failure + npo_days_prop + feeds_prop_hm + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+#for whatever reason, I'm getting a "Error in MEEM(object, conLin, control$niterEM) : Overfitted model!" error code in nlme
+
+# temp_df <- tibble()
+# 
+# for (kegg_gene in top500$geneID) {
+# 
+#   props_toTest <- kegg_props %>%
+#   filter(geneID %in% kegg_gene) %>%
+#   mutate(props_log2 = log2(props)) %>%
+#   inner_join(s_toTest, by = "SampleID")
+# 
+#   possible_error <- try(tiny_df <- tidy_lmer(nlme::lme(as.formula(form1), random = as.formula("~ 1 | SubjectID"), data=props_toTest, na.action=na.omit)) %>% filter(term != '(Intercept)'))
+# 
+#   tiny_df$geneID <- kegg_gene
+# 
+#   if (class(possible_error)[1] %in% "try-error") {
+#     tiny_df <- tibble()
+#   }
+# 
+#   temp_df <- bind_rows(temp_df, tiny_df)
+# 
+# }
+# 
+# summaries_df <- temp_df %>%
+#   group_by(term) %>%
+#   mutate(fdr = p.adjust(p.value, method="BH")) %>%
+#   ungroup() %>%
+#   select(Ortholog = geneID, everything())
+# 
+# save(summaries_df, file = here("Data", glue("{current_sub_study}_kegg500_changes_gf.RDS")))
+
+load(file = here("Data", glue("{current_sub_study}_kegg500_changes_gf.RDS")))
+
+to_select <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes"), fdr < 0.05, Value > 0) %>%
+  arrange(desc(Value)) %>%
+  slice(1:45) %>%
+  pull(Ortholog) %>%
+  as.character() %>%
+  unique()
+  
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes"), Ortholog %in% to_select) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  mutate(ortho_lable = paste(Ortholog, str_trunc(Definition, 30, "right"))) %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(ortho_lable = fct_reorder(ortho_lable, Value))
+
+g <- ggplot(plot_df, aes(Value, ortho_lable, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c("Not significant" = 1, "p.adj < 0.05" = 19)) +
+  scale_color_manual(values = ann_colors$growth_fail[2]) +
+  labs(y = "Ortholog / Description",
+       x = "<-- Decreased vs. no growth failure    Increased vs. no growth failure -->")
+
+plot(g)
+
+ggsave(here("Output", glue("{current_sub_study}_top_increasing_orthologs_gf.pdf")), height = 7, width = 10)
+
+to_select <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes"), fdr < 0.05, Value < 0) %>%
+  arrange(desc(Value)) %>%
+  slice(1:45) %>%
+  pull(Ortholog) %>%
+  as.character() %>%
+  unique()
+  
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes"), Ortholog %in% to_select) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  mutate(ortho_lable = paste(Ortholog, str_trunc(Definition, 30, "right"))) %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(ortho_lable = fct_reorder(ortho_lable, Value))
+
+g <- ggplot(plot_df, aes(Value, ortho_lable, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c("Not significant" = 1, "p.adj < 0.05" = 19)) +
+  scale_color_manual(values = ann_colors$growth_fail[2]) +
+  labs(y = "Ortholog / Description",
+       x = "<-- Decreased vs. no growth failure    Increased vs. no growth failure -->")
+
+plot(g)
+
+ggsave(here("Output", glue("{current_sub_study}_top_decreasing_orthologs_gf.pdf")), height = 7, width = 10)
+
+table_name <- glue("{current_sub_study}_individual_gene_changes_growth_categories_gf.csv")
+
+my_table <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes"), fdr < 0.05) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  left_join(path_annotation, by = "Ortholog")
+
+write_csv(my_table, here("Output", table_name))
+
+print(glue("All orthologs saved together as {table_name}"))
+
+```
+
+#### Combined graph
+
+```{r}
+
+to_select <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes"), fdr < 0.05) %>%
+  arrange(desc(fdr)) %>%
+  slice(1:45) %>%
+  pull(Ortholog) %>%
+  as.character() %>%
+  unique()
+  
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes"), Ortholog %in% to_select) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  mutate(ortho_lable = paste(Ortholog, str_trunc(Definition, 30, "right"))) %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(ortho_lable = fct_reorder(ortho_lable, Value))
+
+g <- ggplot(plot_df, aes(Value, ortho_lable, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c("Not significant" = 1, "p.adj < 0.05" = 19)) +
+  scale_color_manual(values = ann_colors$growth_fail[2]) +
+  labs(y = "Ortholog / Description",
+       x = "<-- Decreased vs. no growth failure    Increased vs. no growth failure -->",
+       color = "")
+
+plot(g)
+
+ggsave(here("Output", glue("{current_sub_study}_top_changing_orthologs_gf.pdf")), height = 5.5, width = 10.5)
+
+```
+
+
+### Butyrate and Aromatic amino acids
+
+#### Linear models
+
+```{r, results='asis'}
+
+props_toTest <- but_ipa %>%
+  mutate(props_log2 = log2(props))
+
+form1 = "props_log2 ~ timepoint_numeric * growth_failure + npo_days_prop + feeds_prop_hm + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+#for whatever reason, I'm getting a "false convergence (8)" error code in nlminb
+
+temp_df <- tibble()
+
+for (selected_gene in unique(but_ipa$geneID)) {
+
+  props_toTest <- but_ipa %>%
+  filter(geneID %in% selected_gene) %>%
+  mutate(props_log2 = log2(props)) %>%
+  inner_join(s_toTest, by = "SampleID")
+
+  possible_error <- try(tiny_df <- tidy_lmer(nlme::lme(as.formula(form1), random = as.formula("~ 1 | SubjectID"), data=props_toTest, na.action=na.omit)) %>% filter(term != '(Intercept)'))
+
+  tiny_df$geneID <- selected_gene
+
+  if (class(possible_error)[1] %in% "try-error") {
+    print(glue("Error with {selected_gene}"))
+    tiny_df <- tibble()
+  }
+
+  temp_df <- bind_rows(temp_df, tiny_df)
+
+}
+
+summaries_df <- temp_df %>%
+  group_by(term) %>%
+  mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup() %>%
+  select(geneID, everything())
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(p.value < 0.05) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log2 transformed abundances"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+table_export(summaries_df %>% filter(p.value < 0.05), "gene_analysis_table_")
+
+```
+
+#### Graphing these changes
+
+```{r}
+
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes")) %>%
+  left_join(annot_df, by = "geneID") %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(geneID = fct_reorder(geneID, Value))
+
+g <- ggplot(plot_df, aes(Value, geneID, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c(1,19)) +
+  scale_color_manual(values=ann_colors$growth_fail[2]) +
+  facet_grid(database~"Value", scales = "free_y", space = "free_y") +
+  labs(y = "geneID",
+       x = "<-- Decreased vs. no growth failure    Increased vs. no growth failure -->",
+       color = "Growth failure")
+
+plot(g)
+
+ggsave(here("Output",glue("{current_sub_study}_gene_abundaces_but_ipa_gf.pdf")), height=5, width=8, useDingbats=F)
+
+```
+
+```{r savepoint, include=FALSE}
+
+save.image(file = here("Data", "after_gene_abundance_analysis.RData"))
+
+```
+
+# End of Report
+
+```{r Generate time stamped report2, eval=FALSE, include=FALSE}
+
+#neat: you can run this following command in the console to give your reports custom names (or date-stamp them)
+
+rstudioapi::documentSaveAll()
+
+script_dir <- file.path("Scripts","Rmds")
+output_dir <- file.path("Output")
+
+if (!dir.exists(here::here(output_dir))) {
+  dir.create(here::here(output_dir))
+}
+
+report_fp <- here::here(script_dir, "Shotgun_gene_abundance_analysis.Rmd")
+output_fp <- here::here(output_dir, paste('Shotgun_gene_abundance_analysis_', Sys.Date(), '.pdf', sep=''))
+
+rmarkdown::render(report_fp, output_file = output_fp)
+
+```
