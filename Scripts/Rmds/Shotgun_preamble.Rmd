@@ -1,0 +1,244 @@
+
+```{r libs, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(qiimer)
+library(vegan)
+library(ape)
+library(usedist)
+library(here)
+
+## Visualization packages
+library(pander)
+library(kableExtra)
+
+library(pheatbuilder)
+library(ggbeeswarm)
+library(ggsci)
+library(viridis)
+library(wesanderson)
+library(RColorBrewer)
+
+library(magrittr)
+
+```
+
+```{r functions}
+
+source(here("Scripts", "Functions", "common_functions.R"))
+
+tidy_lmer2 <- function(lmer_test, term_string) {
+  mod <- anova(lmer_test)
+  form_pairwise <- as.formula(paste0("pairwise~", term_string))
+  bind_rows(data.frame(contrast = rownames(mod), mod, row.names=NULL) %>% rename(df=numDF),
+            data.frame(emmeans(lmer_test, list(form_pairwise), adjust="tukey")[[2]])) %>%
+    #mutate(AIC = AIC(lmer_test)) %>%
+    select(contrast, p.value, everything())
+}
+
+```
+
+```{r}
+data_dir <- here("Data")
+
+### minimum QC read count threshold
+min_reads <- 1000
+
+### number of permutations for the PERMANOVA test
+perm <- 999 ## The number of permutations to do for PERMANOVA. You can start with 99 permutations to run faster while developing the code, then change it to 999 permutations for higher resolution.
+
+### rarefying subsample size 
+richness_subsample_size <- 1000
+
+### mapping file path
+mapping_file_fp1 <- file.path(data_dir, "sagori_metadata_run1to3.tsv")
+mapping_file_fp2 <- file.path(data_dir, "sagori_run_4_mapping_table_CD62UANXX.tsv")
+mapping_file_fp3 <- file.path(data_dir, "sagori_run_5_mapping_table_BCD81AANXX.tsv")
+
+
+### preprocess summary results filepath
+preprocess_fp1 <- file.path(data_dir, "preprocess_summary_run1to3.tsv")
+preprocess_fp2 <- file.path(data_dir, "preprocess_summary_run4.tsv")
+preprocess_fp3 <- file.path(data_dir, "preprocess_summary_run5.tsv")
+
+# ### read quality
+# fastqc_fp1 = file.path(data_dir, 'fastqc_quality_run1to3.tsv')
+# fastqc_fp2 = file.path(data_dir, 'fastqc_quality_run4.tsv')
+# fastqc_fp3 = file.path(data_dir, 'fastqc_quality_run5.tsv')
+
+### taxonomic assignment 
+feature_table_fp1 <- file.path(data_dir, "all_samples_run1to3.tsv")
+feature_table_fp2 <- file.path(data_dir, "all_samples_run4.tsv")
+feature_table_fp3 <- file.path(data_dir, "all_samples_run5.tsv")
+```
+
+```{r sample_sheet_import, echo=FALSE}
+preprocess <- read.delim(preprocess_fp1) %>%
+  bind_rows(read.delim(preprocess_fp2)) %>%
+  bind_rows(read.delim(preprocess_fp3)) %>%
+  rename(SampleID = Samples) %>%
+  select(SampleID, nonhost, input)
+
+do_not_need <-
+  c("investigator", "project_name", "tube_barcode", "box_id", "box_position", "current_antibiotics", "mouse_strain", "cage_id", "plate", "plate_coord", "plate_row", "plate_column", "extract_id", "qiacube_id", "extract_date", "extract_notes", "dna_conc_ng_ul", "redo_dna_conc_ng_ul", "final_dna_conc_ng_ul", "barcode_index_set", "barcode_index_forward", "barcode_index_reverse", "udi_coord", "library_conc_ng_ul", "redo_library_conc_ng_ul", "final_library_conc_ng_ul", "vol_epMotion_ul", "pooled", "flow_cell_lane", "flow_cell_id", "hiseq_id", "hiseq_flow_cell_position", "run_start_date", "dna_plate_barcode", "lib_plate_barcode", "qc_pool_barcode", "seq_pool_barcode", "barcode", "barcode_index_rev", "barcode_index_fwd", "library_nM", "host_species", "diaper_barcode", "swab1_barcode", "swab2_barcode", "box_id_2", "box_position_2", "plate_location_combined", "HostSpecies", "study_group", "RelationID_infant")
+
+s1 <- read.delim(mapping_file_fp1) %>%
+  rename(labor_y1_n0 = `any_labor_YN..1.yes..0.No.`) %>%
+  rename(neonatal_abx_after72 = `neonatal.abx.started....72.hrs.`) %>%
+  rename(CS_y1_n0 = `C.sect..1..0.`) %>%
+  mutate(category = str_remove(Category, "Cat")) %>%
+  mutate(otherSampleID = SampleID) %>%
+  mutate(SampleID = barcode) %>%
+  left_join(preprocess, by = "SampleID") %>%
+  select(-DOL_specimen, -HOL_specimen, -non_host_Read_Counts, -demux_Read_Counts, -both_kept_Read_Counts, -Bacteria_Read_Counts, -Category, -host, -figure1_ID, -sequenced, -BabyID_DOL, -Shannon, -Richness, -Simpson, -Totalsample_timepoint, -samplecount_timepoint, -nonHumanProp, -humanProp, -human_prop_cat, -Bacteria_Read_Counts_OLD, -timepoint_specimen) %>%
+  select(-any_of(do_not_need))
+
+s2 <- read.delim(mapping_file_fp2) %>%
+  mutate(category = as.character(category)) %>%
+  select(-any_of(do_not_need)) %>%
+  rename(SubjectID = subject_id) %>%
+  rename(SampleType = sample_type) %>%
+  rename(birth.weight = BW) %>%
+  rename(Gestation = GA) %>%
+  mutate(Sex = case_when(sex_F0_M1 == 0 ~ "F",
+                         sex_F0_M1 == 1 ~ "M")) %>%
+  select(-sex_F0_M1) %>%
+  rename(TimePoint = timepoint) %>%
+  mutate(TimePoint = if_else(!is.na(TimePoint), paste0("T", TimePoint), NA_character_)) %>%
+  mutate(DOL = HOL / 24) %>%
+  mutate(which_run = "run4") %>%
+  mutate(PMA = (DOL/7) + Gestation) %>%
+  left_join(preprocess, by = "SampleID")
+
+s3 <- read.delim(mapping_file_fp3) %>%
+  mutate(category = as.character(category)) %>%
+  select(-any_of(do_not_need)) %>%
+  rename(SubjectID = subject_id) %>%
+  mutate(SubjectID = if_else(str_detect(SampleID, "inf"), paste0("inf", SubjectID), NA_character_)) %>%
+  rename(birth.weight = BW) %>%
+  rename(Gestation = GA) %>%
+  mutate(mat_abx_within72_noCSPPX = as.character(mat_abx_within72_noCSPPX)) %>%
+  mutate(Sex = case_when(sex_F0_M1 == 0 ~ "F",
+                         sex_F0_M1 == 1 ~ "M")) %>%
+  select(-sex_F0_M1) %>%
+  rename(TimePoint = timepoint) %>%
+  mutate(TimePoint = if_else(!is.na(TimePoint), paste0("T", TimePoint), NA_character_)) %>%
+  mutate(DOL = HOL / 24) %>%
+  mutate(which_run = "run5") %>%
+  mutate(PMA = (DOL/7) + Gestation) %>%
+  left_join(preprocess, by="SampleID")
+
+growth_data <- read_csv(here("Data", "baby_growth_data.csv")) %>%
+  rename(redcap_id = REDCapID) %>%
+  mutate(redcap_id = as.character(redcap_id)) %>%
+  select(-category, -Sex)
+
+growth_data %<>%
+  mutate(growth_cat = case_when(ZdecDC_gt0.8 == 0 & ZdecDC_gt1.2 == 0 & ZdecDC_gt2 == 0 ~ "normal",
+                                ZdecDC_gt0.8 == 1 & ZdecDC_gt1.2 == 0 & ZdecDC_gt2 == 0 ~ "mild retardation",
+                                ZdecDC_gt0.8 == 0 & ZdecDC_gt1.2 == 1 | ZdecDC_gt2 == 1 ~ "moderate to severe retardation"))
+
+s <- bind_rows(s1, s2, s3) %>%
+  mutate(SampleID = as.character(SampleID), SubjectID = as.character(SubjectID)) %>%
+  mutate(redcap_id = str_remove(SubjectID, "inf")) %>%
+  mutate(isControl = grepl("DNAfreewater|Extract|mockdna", SampleID, ignore.case = T)) %>%
+  mutate(Keep = input > min_reads) %>%
+  mutate_at(vars(CS_y1_n0, labor_y1_n0, neonatal_abx_after72, NPO_24h_prior, NPO_48h_prior, mother_or_infant, redcap_id, neonatal_abx_ever, mat_abx, mat_CMVserostatus, starts_with("Abxprior"), Diet_nonhuman_24h_prior, stored_MBCore, neonatal_abx_within72), as.character) %>%
+  left_join(growth_data, by = "redcap_id")
+
+#checks
+# s %>% select(redcap_id, starts_with("ZdecDC_gt"), growth_cat) %>% view()
+
+# s %>%
+#   filter(SampleType %in% "Feces") %>%
+#   select(SampleID, SubjectID, DOL) %>%
+#   write_csv(here("Output", "List of baby samples from all 5 runs.csv"))
+
+# s %>%
+#   write_csv(here("Output", "Combined_metadata_runs1to5.csv"))
+
+```
+
+```{r merging kraken}
+
+kraken1to4 <- merge_kraken(feature_table_fp1, feature_table_fp2)
+
+kraken1to4 <- kraken1to4 %>%
+  select(-Consensus.Lineage, everything()) %>%
+  rename(`#OTU.ID`=X.OTU.ID)
+fp_out <- file.path(data_dir, "kraken1to4.tsv")
+cat("# Constructed from biom file",file=fp_out,sep="\n")
+write.table(kraken1to4, fp_out, sep='\t', quote=F, row.names=F, append=T)
+
+kraken_all <- merge_kraken(file.path(data_dir, "kraken1to4.tsv"), feature_table_fp3)
+
+kraken_all <- kraken_all %>%
+  select(-Consensus.Lineage, everything()) %>%
+  rename(`#OTU.ID`=X.OTU.ID)
+fp_out <- file.path(data_dir, "kraken_all.tsv")
+cat("# Constructed from biom file",file=fp_out,sep="\n")
+write.table(kraken_all, fp_out, sep='\t', quote=F, row.names=F, append=T)
+
+```
+
+
+```{r}
+o <- read_qiime_otu_table(file.path(data_dir, "kraken_all.tsv"))
+
+counts <- o$counts
+colnames(counts) <- sub("\\.taxa$", "", colnames(counts))
+
+ta <- o$metadata %>%
+  enframe("Taxid", "Taxon") %>%
+  mutate(Taxon = str_remove(Taxon, "(; [kpcofgs]__)+$")) %>%
+  mutate(Taxon = gsub("[kpcofgs]__", "", Taxon)) 
+
+adf <- split_assignments(ta$Taxon) %>%
+  mutate(Species = ifelse(!is.na(Genus) & !is.na(Species), paste(Genus, Species), NA))
+rownames(adf) <- ta$Taxid
+rm(ta)
+
+# Delete human contamination and emp
+is_human <- grepl("Chordata", adf$Phylum)
+is_empty <- rowSums(counts) == 0
+taxa_to_delete = is_human | is_empty
+adf <- adf[!taxa_to_delete,]
+counts <- counts[!taxa_to_delete,]
+rm(is_human, is_empty, taxa_to_delete)
+
+a <- simplify_assignments(adf, rank1 = "Phylum", rank2="Species")
+
+summed_cts <- rowsum(counts, a)
+summed_props <- sweep(summed_cts, 2, colSums(summed_cts), "/")
+
+a_g <- simplify_assignments(adf, rank1="Phylum", rank2="Genus")
+summed_cts_g <- rowsum(counts, a_g)
+summed_props_g <- sweep(summed_cts_g, 2, colSums(summed_cts_g), "/")
+
+s <- merge(s, data.frame(kraken_counts= colSums(summed_cts)), by.x="SampleID", by.y="row.names", all.x=T)
+```
+
+```{r alpha}
+richness <- rarefy(t(counts), richness_subsample_size) %>%
+  enframe("SampleID", "Richness")
+  
+shannon <- diversity(t(counts)) %>%
+  enframe("SampleID", "Shannon")
+
+s <- s %>%
+  left_join(richness, by="SampleID") %>%
+  left_join(shannon, by="SampleID")
+
+rm(richness, shannon)
+```
+
+```{r beta}
+bc <- vegdist(t(summed_props))
+jd <- vegdist(t(summed_props), binary = T)
+```
+
+```{r savepoint}
+
+rm(kraken_all, kraken1to4, preprocess, s1, s2, s3, feature_table_fp1, feature_table_fp2, feature_table_fp3, fp_out, mapping_file_fp1, mapping_file_fp2, mapping_file_fp3, do_not_need, preprocess_fp1, preprocess_fp2, preprocess_fp3)
+
+save.image(file = here("Data",paste0("shotgun_data_",format(Sys.time(), "%F"),".RData")))
+```
