@@ -9,4 +9,8 @@ You must run the R markdowns (Scripts/Rmds) in the following order so that the a
 1) Shotgun_preamble.Rmd
 2) Shotgun_taxonomic_growth_analysis.Rmd
 3) Download the [KEGG data files from Zenodo](https://doi.org/10.5281/zenodo.19854903) and place in Data/
-3) Shotgun_gene_abundance_analysis.Rmd
+4) Shotgun_gene_abundance_analysis.Rmd
+5) Shotgun_metabolomic_analysis.Rmd
+6) Shotgun_random_forest_analysis.Rmd
+7) FIGURESANDTABLES.Rmd
+8) The Rmds in sensitivity/
