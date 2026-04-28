@@ -1,0 +1,1328 @@
+---
+title: |
+  Sagori Mukhopadhyay - Runs 1 to 5 - Random forest analysis
+  With growth failure at the 10% percentile cutoff
+author: "Scott G. Daniel, PennCHOP Microbiome Program"
+date: "`r Sys.Date()`"
+geometry: margin=3cm
+output: 
+    pdf_document:
+        keep_tex: false
+        toc: true
+        toc_depth: 4
+---
+
+```{r setup, echo=FALSE}
+### ================
+###   knitr setup
+### ================
+library(knitr)
+opts_chunk$set(
+  tidy=FALSE,
+  cache=FALSE,
+  echo=FALSE,
+  warning=FALSE,
+  message=FALSE,
+  dpi=100,
+  fig.width=8,
+  fig.height=8,
+  fig.align = "center"
+  )
+```
+
+```{r libs and funcs, message=FALSE, warning=FALSE}
+
+library(here)
+library(tidyverse)
+library(qiimer)
+library(vegan)
+library(ape)
+library(usedist)
+
+## Visualization packages
+library(pander)
+library(kableExtra)
+
+library(pheatbuilder)
+library(ggbeeswarm)
+library(ggsci)
+library(viridis)
+library(RColorBrewer)
+
+# stats packages
+library(adonisplus)
+library(nlme)
+library(emmeans) # for lmer post-hoc tests
+library(broom)
+library(ghibli)
+library(glue)
+library(magrittr)
+select <- dplyr::select
+library(patchwork)
+library(qualpalr)
+library(randomForest)
+library(microbenchmark)
+library(Boruta)
+library(mlbench)
+library(caret)
+library(pROC)
+```
+
+```{r load data}
+# source(here("Scripts", "Functions", "common_functions.R"))
+load(file = here("Data","shotgun_data_2026-04-28.RData")) #source for raw data
+load(file = here("Data","sagori_taxonomic_data.RData")) #source for fixed s2 table
+load(file = here("Data","sagori_kegg_data.RData")) #source for gene abundance data
+table_export <- table_iterator()
+
+```
+
+# Random forest analysis / predicting microbiome age
+
+```{r setup data frames}
+
+s2 %<>%
+  mutate(growth_failure = fct_recode(GF36_10, Yes = "1", No = "0"))
+
+s_toTest <- s2 %>% filter(Keep, !isControl)
+
+top25 <- summed_props_long %>%
+  group_by(Taxa) %>%
+  summarise(mean_props = mean(props)) %>%
+  ungroup() %>%
+  arrange(desc(mean_props)) %>%
+  slice(1:29) %>%
+  filter(!str_detect(Taxa, "Ralstonia|Cutibacterium|Vibrio"))
+
+training_data <- s_toTest %>%
+  filter(growth_failure %in% "No") %>%
+  left_join(summed_props_long, by = "SampleID") %>%
+  filter(Taxa %in% top25$Taxa) %>%
+  select(SampleID, DOL, Taxa, props) %>% #SubjectID, 
+  mutate(Taxa = str_replace_all(Taxa, " ", "_")) %>%
+  pivot_wider(names_from = "Taxa", values_from = "props", values_fill = 0) %>%
+  column_to_rownames(var = "SampleID")
+
+set.seed(43)
+validation_babies <- sample(s_toTest$SubjectID, 15)
+validation_samples <- s_toTest %>%
+  filter(growth_failure %in% "No") %>%
+  filter(SubjectID %in% validation_babies) %>%
+  pull(SampleID)
+
+validation_data <- training_data[validation_samples,]
+ind2 <- setdiff(rownames(training_data), rownames(validation_data))
+training_data <- training_data[ind2,]
+
+testing_data <- s_toTest %>%
+  filter(growth_failure %in% "Yes") %>%
+  left_join(summed_props_long, by = "SampleID") %>%
+  filter(Taxa %in% top25$Taxa) %>%
+  select(SampleID, DOL, Taxa, props) %>% #SubjectID, 
+  mutate(Taxa = str_replace_all(Taxa, " ", "_")) %>%
+  pivot_wider(names_from = "Taxa", values_from = "props", values_fill = 0) %>%
+  column_to_rownames(var = "SampleID")
+
+#check
+# all.equal(colnames(testing_data), colnames(training_data))
+# [1] TRUE
+
+```
+
+To use a random forest model we will do the following:
+
+1) Use the top 25 most abundant bacterial species (excluding common contaminants like *Cutibacterium acnes*.
+
+2) Divide the data set into those with regular growth (the training set) and those with growth failure (the test set).
+
+5) Do a random selection of `r length(validation_babies)` babies as the validation set (which gives `r length(validation_samples)` samples).
+
+3) Construct the random forest model on the training set (minus validation samples).
+
+4) We will use the model to predict the microbiome age of the growth failure babies. The hypothesis being that their microbiomes are actually younger and less-developed than similarly-aged normal growth babies.
+
+Here is a summary of the model with the % variance explained:
+
+```{r the model}
+rf_model <- randomForest(DOL ~ ., data = training_data, importance=T)
+print(rf_model)
+
+#save for later
+rf_model_25taxa <- rf_model
+```
+
+## Accuracy
+
+We can also order the predictor taxa according to how much they add to the accuracy of the model:
+
+```{r, results='asis'}
+imp <- importance(rf_model, type = 1)
+imp_df <- tibble(Taxa = dimnames(imp)[[1]], MeanDecAccu = as.vector(imp)) #strata = "SubjectID",
+imp_df %>%
+  arrange(desc(MeanDecAccu)) %>%
+  pander(digits=2)
+```
+
+### Plot
+
+Or as a plot:
+
+```{r, fig.width=7, fig.height=5}
+
+varImpPlot(rf_model, type = 1)
+
+dev.copy(pdf, here("Output_sensitivity", "importance_graph.pdf"))
+
+dev.off()
+
+```
+
+## Plot of training data
+
+Next, we can plot the predicted age of the samples vs. the actual age:
+
+```{r}
+
+plot_df <- tibble(class = "Regular growth", MMI = as.vector(rf_model$predicted), actual_DOL = as.vector(rf_model$y))
+
+growth_class_colors <- c("Regular growth" = "#446590FF")
+
+# nls = nonlinear least squares
+# SSlogis = Self-starting logistic model
+
+mod1 = nls(MMI ~ SSlogis(actual_DOL, Asym, xmid, scal), data=plot_df)
+# mod1
+
+plot_df %>%
+  ggplot(mapping = aes(x=actual_DOL, y=MMI, color=class)) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  geom_point() +
+  geom_smooth(
+    method = "nls", formula = y ~ SSlogis(x, Asym, xmid, scal),
+    se = FALSE
+  ) +
+  annotate(geom="text", x=10, y=70, label=glue("Logistic curve for normal growth:\n Horiz. asymptote={round(mod1$m$getPars()['Asym'],2)}\n  xmid={round(mod1$m$getPars()['xmid'],2)}\n  scale={round(mod1$m$getPars()['scal'],2)}"), color = "#446590FF", hjust = 0) +
+  coord_equal() +
+  scale_color_manual(values = growth_class_colors) +
+  labs(
+    y = "Predicted DOL",
+    x = "Actual DOL",
+    title = "Predicted age from microbiome abundances",
+    subtitle = "Curve represents self-starting logistic model"
+  )
+
+ggsave(here("Output_sensitivity", "random forest prediction for normal growth.pdf"), height = 6, width = 5.4)
+
+```
+
+## Plot of all data
+
+Finally, we can predict the microbiome age of babies with growth failure:
+
+```{r}
+p2 <- predict(rf_model, testing_data)
+
+plot_df <- tibble(class = "Regular growth", MMI = as.vector(rf_model$predicted), actual_DOL = as.vector(rf_model$y), SampleID = names(rf_model$y)) %>%
+  bind_rows(tibble(class = "Growth failure", MMI = as.vector(p2), actual_DOL = testing_data$DOL, SampleID = rownames(testing_data))) %>%
+  mutate(class = fct_relevel(class, "Regular growth"))
+
+growth_class_colors <- c("Regular growth" = "#446590FF", "Growth failure" = "#AD8152FF")
+
+mod2 = nls(MMI ~ SSlogis(actual_DOL, Asym, xmid, scal), data=plot_df %>% filter(class %in% "Growth failure"))
+# mod2
+
+# mod2 = nls(MMI ~ SSfpl(actual_DOL, A, B, xmid, scal), data=plot_df %>% filter(class %in% "Growth failure"))
+# weird error
+# Error in nls(y ~ cbind(1, 1/(1 + exp((xmid - x)/exp(lscal)))), data = xy,  : 
+#   step factor 0.000488281 reduced below 'minFactor' of 0.000976562
+# mod2
+
+for_save <- plot_df %>%
+  ggplot(mapping = aes(x=actual_DOL, y=MMI, color=class)) +
+  theme_bw() +
+  geom_point() +
+  annotate(geom="text", x=10, y=70, label=glue("Logistic curve for growth failure:\n Horiz. asymptote={round(mod2$m$getPars()['Asym'],2)}\n  xmid={round(mod2$m$getPars()['xmid'],2)}\n  scale={round(mod2$m$getPars()['scal'],2)}"), color = "#AD8152FF", hjust = 0) +
+  geom_smooth(
+    method = "nls", formula = y ~ SSlogis(x, Asym, xmid, scal),
+    se = FALSE
+  ) +
+  coord_equal() +
+  scale_color_manual(values = growth_class_colors) +
+  labs(
+    y = "Predicted DOL",
+    x = "Actual DOL",
+    title = "Predicted age from microbiome abundances",
+    subtitle = "Curves represents self-starting logistic model"
+  )
+
+ggsave(plot = for_save, here("Output_sensitivity", "random forest prediction for both growth legend.pdf"), height = 6, width = 6)
+
+for_save + theme(legend.position = "none")
+
+ggsave(here("Output_sensitivity", "random forest prediction for both growth.pdf"), height = 6, width = 5.4)
+
+```
+
+## Predicted minus actual
+
+```{r, fig.width=5, fig.height=3}
+
+# mod1 is the SSlogis model for class %in% "Regular growth"
+# mod2 is the SSlogis model for class %in% "Growth failure"
+
+plot_df$curve_value <- predict(mod1, newdata = plot_df)
+
+plot_df %<>%
+  mutate(RMMI = MMI - curve_value)
+
+plot_df_25taxa <- plot_df
+
+plot_df %>%
+  ggplot(aes(x = class, y = RMMI)) +
+  geom_boxplot(outlier.alpha = 0) +
+  geom_quasirandom(dodge.width = 0.75, alpha = 0.25)
+
+```
+
+### Mixed-effects model
+
+```{r,results='asis'}
+
+test_df <- plot_df %>%
+  left_join(s_toTest %>% select(SampleID, SubjectID), join_by(SampleID))
+
+tidy_lmer(nlme::lme(fixed = RMMI ~ class, random = ~ 1 | SubjectID, data = test_df)) %>% pander(digits=2, split.cells=15)
+
+```
+
+## ROC curves
+
+```{r}
+
+my_roc <- plot_df %>%
+  mutate(class = fct_relevel(class, "Regular growth")) %>%
+  roc(class ~ RMMI, data = .)
+
+plot(my_roc)
+
+# my_roc$specificities
+
+with(my_roc, data_frame(sensitivities, specificities, thresholds)) %>%
+  # mutate(thresholds = if_else(thresholds < 0.3, 0.3, thresholds)) %>%
+  # mutate(thresholds = if_else(thresholds > 0.53, 0.55, thresholds)) %>%
+  mutate(fpr = 1 - specificities, tpr = sensitivities) %>%
+  select(thresholds, tpr, fpr) %>%
+  gather(performance, value, -thresholds) %>%
+  ggplot() +
+  geom_step(aes(x=thresholds, y=value, color=performance)) +
+  labs(title = "Prediction of growth class based on RMMI",
+       y="False or True positive rate (fpr or tpr)",
+       x="RMMI threshold for predicting growth class")
+
+ggsave(filename = here::here("Output_sensitivity","TPFP for growth class 25 taxa.pdf"), device = "pdf")
+
+```
+
+### AUROC and Gini
+
+Where AUROC is total area under the curve and Gini indexe is 2 X AUROC - 1. [See here for more](https://en.wikipedia.org/wiki/Receiver_operating_characteristic#Area_under_the_curve).
+
+Gini is more intuitive as 1 is a perfect model while 0 is no better than chance.
+
+```{r}
+
+auroc <- auc(my_roc)
+
+print(auroc)
+
+gini <- 2 * auroc - 1
+
+glue("Gini index is {round(gini,4)}")
+
+```
+
+## For validation set
+
+```{r, fig.width=5, fig.height=3}
+
+p3 <- predict(rf_model, validation_data)
+
+plot_df <- tibble(class = "Training", MMI = as.vector(rf_model$predicted), actual_DOL = as.vector(rf_model$y), SampleID = names(rf_model$y)) %>%
+  bind_rows(tibble(class = "Validation", MMI = as.vector(p3), actual_DOL = validation_data$DOL, SampleID = rownames(validation_data))) %>%
+  mutate(class = fct_relevel(class, "Training"))
+
+plot_df$curve_value <- predict(mod1, newdata = plot_df)
+
+plot_df %<>%
+  mutate(RMMI = MMI - curve_value)
+
+plot_df %>%
+  ggplot(aes(x = class, y = RMMI)) +
+  geom_boxplot(outlier.alpha = 0) +
+  geom_quasirandom(dodge.width = 0.75, alpha = 0.25)
+
+```
+
+### Mixed-effects model
+
+```{r,results='asis'}
+
+test_df <- plot_df %>%
+  left_join(s_toTest %>% select(SampleID, SubjectID), join_by(SampleID))
+
+tidy_lmer(nlme::lme(fixed = RMMI ~ class, random = ~ 1 | SubjectID, data = test_df)) %>% pander(digits=2, split.cells=15)
+
+```
+
+# Random forest feature trimming
+
+```{r reselect}
+
+min_frac_nonzero <- 0.75
+mean_abund <- 0.01
+
+top_taxa <- summed_props %>%
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  group_by(Taxa) %>%
+  summarise(frac_non_zero = sum(props > 0) / length(props), mean_prop = mean(props)) %>%
+  ungroup() %>%
+  filter(frac_non_zero > min_frac_nonzero) %>%
+  filter(!str_detect(Taxa, "Ralstonia|Cutibacterium|Vibrio|Bradyrhizobium|Rhizobiales"))
+
+top50 <- summed_props_long %>%
+  group_by(Taxa) %>%
+  summarise(mean_props = mean(props)) %>%
+  ungroup() %>%
+  arrange(desc(mean_props)) %>%
+  slice(1:54) %>%
+  filter(!str_detect(Taxa, "Ralstonia|Cutibacterium|Vibrio|Bradyrhizobium|Rhizobiales"))
+
+training_data <- s_toTest %>%
+  filter(growth_failure %in% "No") %>%
+  left_join(summed_props_long, by = "SampleID") %>%
+  filter(Taxa %in% top_taxa$Taxa) %>%
+  select(SampleID, DOL, Taxa, props) %>% #SubjectID, 
+  mutate(Taxa = str_replace_all(Taxa, " ", "_")) %>%
+  pivot_wider(names_from = "Taxa", values_from = "props", values_fill = 0) %>%
+  column_to_rownames(var = "SampleID")
+
+validation_data <- training_data[validation_samples,]
+ind2 <- setdiff(rownames(training_data), rownames(validation_data))
+training_data <- training_data[ind2,]
+
+testing_data <- s_toTest %>%
+  filter(growth_failure %in% "Yes") %>%
+  left_join(summed_props_long, by = "SampleID") %>%
+  filter(Taxa %in% top_taxa$Taxa) %>%
+  select(SampleID, DOL, Taxa, props) %>% #SubjectID, 
+  mutate(Taxa = str_replace_all(Taxa, " ", "_")) %>%
+  pivot_wider(names_from = "Taxa", values_from = "props", values_fill = 0) %>%
+  column_to_rownames(var = "SampleID")
+
+#sanity check, make sure same baby is not in both validation and training
+# samples_in_training <- rownames(training_data)
+# training_babies <- s_toTest %>%
+#   filter(SampleID %in% samples_in_training) %>%
+#   pull(SubjectID)
+# intersect(training_babies, validation_babies) #should be "character(0)"
+
+```
+
+We will use a filter of `r min_frac_nonzero` of samples being nonzero for a taxa leaving us with `r length(top_taxa$Taxa)` taxa.
+
+## Boruta
+
+Let's try Boruta which iteratively removes the features which are proved by a statistical test to be less relevant than random probes. Reference: Kursa, M. B., & Rudnicki, W. R. (2010). Feature selection with the Boruta package. J Stat Softw, 36(11), 1-13.
+
+```{r}
+
+# set.seed(42)
+# boruta_model <- Boruta(DOL ~ ., data = training_data, doTrace = 2, maxRuns = 500)
+# save(boruta_model, file = here("Output_sensitivity", "boruta_model_taxa_noSubjectID.RData"))
+load(file = here("Output_sensitivity", "boruta_model_taxa_noSubjectID.RData"))
+
+print(boruta_model)
+
+```
+
+```{r}
+
+plot(boruta_model, las = 2, cex.axis = 0.7)
+
+```
+
+## Two random forests
+
+We will do one random forest on the original `r length(top_taxa$Taxa)` variables and one on the `r length(getSelectedAttributes(boruta_model))` important variables as determined by Boruta.
+
+```{r}
+
+set.seed(42)
+rf_model <- randomForest(DOL ~ ., data = training_data, localImp=T) #, strata = "SubjectID"
+rf_model_improved <- randomForest(training_data[,getSelectedAttributes(boruta_model)], training_data$DOL, localImp=T) #, strata = "SubjectID"
+
+print(rf_model)
+print(rf_model_improved)
+
+rf_model_improved_78taxa <- rf_model_improved
+
+```
+
+```{r eval=FALSE, include=FALSE}
+
+library(randomForestExplainer)
+explain_forest(rf_model_improved, interactions = F)
+
+```
+
+## Plot of training data 2
+
+Next, we can plot the predicted age of the samples vs. the actual age:
+
+```{r}
+
+plot_df <- tibble(class = "Regular growth", MMI = as.vector(rf_model_improved$predicted), actual_DOL = as.vector(rf_model_improved$y))
+
+growth_class_colors <- c("Regular growth" = "#446590FF")
+
+# nls = nonlinear least squares
+# SSlogis = Self-starting logistic model
+
+mod1 = nls(MMI ~ SSlogis(actual_DOL, Asym, xmid, scal), data=plot_df)
+# mod1
+
+plot_df %>%
+  ggplot(mapping = aes(x=actual_DOL, y=MMI, color=class)) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  geom_point() +
+  geom_smooth(
+    method = "nls", formula = y ~ SSlogis(x, Asym, xmid, scal),
+    se = FALSE
+  ) +
+  annotate(geom="text", x=10, y=70, label=glue("Logistic curve for normal growth:\n Horiz. asymptote={round(mod1$m$getPars()['Asym'],2)}\n  xmid={round(mod1$m$getPars()['xmid'],2)}\n  scale={round(mod1$m$getPars()['scal'],2)}"), color = "#446590FF", hjust = 0) +
+  coord_equal() +
+  scale_color_manual(values = growth_class_colors) +
+  labs(
+    y = "Predicted DOL",
+    x = "Actual DOL",
+    title = "Predicted age from microbiome abundances",
+    subtitle = "Curve represents self-starting logistic model"
+  )
+
+ggsave(here("Output_sensitivity", "random forest prediction for normal growth 2.pdf"), height = 6, width = 5.4)
+
+```
+
+## Plot of all data 2
+
+Finally, we can predict the microbiome age of babies with growth failure:
+
+```{r}
+p2 <- predict(rf_model_improved, testing_data)
+
+plot_df <- tibble(class = "Regular growth", MMI = as.vector(rf_model_improved$predicted), actual_DOL = as.vector(rf_model_improved$y), SampleID = rownames(training_data)) %>%
+  bind_rows(tibble(class = "Growth failure", MMI = as.vector(p2), actual_DOL = testing_data$DOL, SampleID = rownames(testing_data))) %>%
+  mutate(class = fct_relevel(class, "Regular growth"))
+
+growth_class_colors <- c("Regular growth" = "#446590FF", "Growth failure" = "#AD8152FF")
+
+mod2 = nls(MMI ~ SSlogis(actual_DOL, Asym, xmid, scal), data=plot_df %>% filter(class %in% "Growth failure"))
+# mod2
+
+# mod2 = nls(MMI ~ SSfpl(actual_DOL, A, B, xmid, scal), data=plot_df %>% filter(class %in% "Growth failure"))
+# weird error
+# Error in nls(y ~ cbind(1, 1/(1 + exp((xmid - x)/exp(lscal)))), data = xy,  : 
+#   step factor 0.000488281 reduced below 'minFactor' of 0.000976562
+# mod2
+
+for_save <- plot_df %>%
+  ggplot(mapping = aes(x=actual_DOL, y=MMI, color=class)) +
+  theme_bw() +
+  geom_point() +
+  # annotate(geom="text", x=10, y=70, label=glue("Logistic curve for growth failure:\n Horiz. asymptote={round(mod2$m$getPars()['Asym'],2)}\n  xmid={round(mod2$m$getPars()['xmid'],2)}\n  scale={round(mod2$m$getPars()['scal'],2)}"), color = "#AD8152FF", hjust = 0) +
+  geom_smooth(
+    method = "nls", formula = y ~ SSlogis(x, Asym, xmid, scal),
+    se = FALSE
+  ) +
+  scale_color_manual(values = growth_class_colors) +
+  labs(
+    y = "Predicted DOL",
+    x = "Actual DOL",
+    title = "",
+    subtitle = ""
+  )
+
+ggsave(plot = for_save, here("Output_sensitivity", "random forest prediction for both growth legend 2.pdf"), height = 6, width = 6)
+
+for_save + theme(legend.position = "none")
+
+ggsave(here("Output_sensitivity", "random forest prediction for both growth 2.pdf"), height = 5.5, width = 10)
+
+```
+
+## Predicted minus actual
+
+```{r, fig.width=5, fig.height=3}
+
+# mod1 is the SSlogis model for class %in% "Regular growth"
+# mod2 is the SSlogis model for class %in% "Growth failure"
+
+plot_df$curve_value <- predict(mod1, newdata = plot_df)
+
+plot_df %<>%
+  mutate(RMMI = MMI - curve_value)
+
+plot_df_78taxa <- plot_df
+
+plot_df %>%
+  ggplot(aes(x = class, y = RMMI)) +
+  geom_boxplot(outlier.alpha = 0) +
+  geom_quasirandom(dodge.width = 0.75, alpha = 0.25) +
+  theme_bw() +
+  labs(x = "Class", y = "Relative microbiota maturity index")
+
+ggsave(here("Output_sensitivity", "RMMI_random_forest_feature_trimming_78_taxa.pdf"), height = 3, width = 3)
+
+```
+
+### Mixed-effects model
+
+```{r, results='asis'}
+
+test_df <- plot_df %>%
+  left_join(s_toTest %>% select(SampleID, SubjectID), join_by(SampleID))
+
+tidy_lmer(nlme::lme(fixed = RMMI ~ class, random = ~ 1 | SubjectID, data = test_df)) %>% pander(digits=2, split.cells=15)
+
+```
+
+## ROC curves
+
+```{r 78 taxa roc}
+
+my_roc <- plot_df %>%
+  mutate(class = fct_relevel(class, "Regular growth")) %>%
+  roc(class ~ RMMI, data = .)
+
+ggroc(my_roc) +
+  theme_bw() +
+  labs(title = "ROC curve") +
+  geom_abline(slope = 1, intercept = c(1,0), lty = 2)
+
+ggsave(filename = here::here("Output_sensitivity","ROC curve for growth class 78 taxa.pdf"), device = "pdf", height = 3, width = 3)
+
+with(my_roc, data_frame(sensitivities, specificities, thresholds)) %>%
+  # mutate(thresholds = if_else(thresholds < 0.3, 0.3, thresholds)) %>%
+  # mutate(thresholds = if_else(thresholds > 0.53, 0.55, thresholds)) %>%
+  mutate(fpr = 1 - specificities, tpr = sensitivities) %>%
+  select(thresholds, tpr, fpr) %>%
+  gather(performance, value, -thresholds) %>%
+  ggplot() +
+  theme_bw() +
+  geom_step(aes(x=thresholds, y=value, color=performance)) +
+  labs(title = "",
+       y="False or True positive rate (fpr or tpr)",
+       x="RMMI threshold for predicting growth class")
+
+ggsave(filename = here::here("Output_sensitivity","TPFP curve for growth class 78 taxa.pdf"), device = "pdf", height = 3, width = 4)
+
+```
+
+### AUROC and Gini
+
+Where AUROC is total area under the curve and Gini indexe is 2 X AUROC - 1. [See here for more](https://en.wikipedia.org/wiki/Receiver_operating_characteristic#Area_under_the_curve).
+
+Gini is more intuitive as 1 is a perfect model while 0 is no better than chance.
+
+```{r}
+
+auroc <- auc(my_roc)
+
+print(auroc)
+
+gini <- 2 * auroc - 1
+
+glue("Gini index is {round(gini,4)}")
+
+```
+
+## For validation set
+
+```{r, fig.width=5, fig.height=3}
+
+p3 <- predict(rf_model_improved, validation_data)
+
+plot_df <- plot_df_78taxa %>%
+  bind_rows(tibble(class = "Validation", MMI = as.vector(p3), actual_DOL = validation_data$DOL, SampleID = rownames(validation_data))) %>%
+  mutate(class = fct_relevel(class, "Regular growth", "Growth failure"))
+
+plot_df$curve_value <- predict(mod1, newdata = plot_df)
+
+plot_df %<>%
+  mutate(RMMI = MMI - curve_value)
+
+plot_df %>%
+  ggplot(aes(x = class, y = RMMI)) +
+  geom_boxplot(outlier.alpha = 0) +
+  geom_quasirandom(dodge.width = 0.75, alpha = 0.25)
+
+```
+
+### Mixed-effects model
+
+```{r, results='asis'}
+
+test_df <- plot_df %>%
+  left_join(s_toTest %>% select(SampleID, SubjectID), join_by(SampleID))
+
+tidy_lmer(nlme::lme(fixed = RMMI ~ class, random = ~ 1 | SubjectID, data = test_df)) %>% pander(digits=2, split.cells=15)
+
+```
+
+# Random forest with a mix of variables
+
+Since adding pathway data did not increase accuracy at all, we will try actual KEGG genes.
+
+Here we will use the 78 taxa as before, the top 500 KEGG genes by mean abundance, log(`AbxHoursPerHOL`), and log(`npo_days_prop`) to predict microbiome maturity.
+
+Values will have to be scaled to each measurements mean and standard deviation.
+
+```{r scale and combine}
+
+taxa_data <- summed_props_long %>%
+  filter(Taxa %in% top_taxa$Taxa) %>%
+  group_by(Taxa) %>%
+  mutate(scaled_value = as.numeric(scale(props))) %>%
+  ungroup()
+
+top_kegg <- kegg_props %>%
+  group_by(geneID) %>%
+  summarise(frac_non_zero = sum(props > 0) / length(props), mean_prop = mean(props)) %>%
+  arrange(desc(mean_prop)) %>%
+  slice(1:500)
+
+kegg_data <- kegg_props %>%
+  filter(geneID %in% top_kegg$geneID) %>%
+  group_by(geneID) %>%
+  mutate(scaled_value = as.numeric(scale(props))) %>%
+  ungroup() %>%
+  select(SampleID, geneID, scaled_value) %>%
+  pivot_wider(names_from = "geneID", values_from = "scaled_value", values_fill = 0)
+
+clinical_data <- s_toTest %>%
+  mutate(npo_days_prop_min = min(npo_days_prop[npo_days_prop > 0])) %>%
+  mutate(npo_days_prop = ifelse(npo_days_prop == 0, npo_days_prop_min/2, npo_days_prop)) %>%
+  mutate(log_npo_days_prop = log(npo_days_prop)) %>%
+  mutate(AbxHoursPerHOL_min = min(AbxHoursPerHOL[AbxHoursPerHOL > 0])) %>%
+  mutate(AbxHoursPerHOL = ifelse(AbxHoursPerHOL == 0, AbxHoursPerHOL_min/2, AbxHoursPerHOL)) %>%
+  mutate(log_AbxHoursPerHOL = log(AbxHoursPerHOL)) %>%
+  select(SampleID, log_AbxHoursPerHOL, log_npo_days_prop) %>%
+  filter(!is.na(log_npo_days_prop))
+
+clinical_data[,2:3] <- scale(clinical_data[,2:3])
+
+training_data <- s_toTest %>%
+  filter(growth_failure %in% "No") %>%
+  left_join(taxa_data, by = "SampleID") %>%
+  select(SampleID, DOL, Taxa, scaled_value) %>%
+  mutate(Taxa = str_replace_all(Taxa, " ", "_")) %>%
+  pivot_wider(names_from = "Taxa", values_from = "scaled_value", values_fill = 0)
+
+validation_data <- training_data %>% filter(SampleID %in% validation_samples)
+ind2 <- setdiff(training_data$SampleID, validation_data$SampleID)
+training_data <- training_data %>% filter(SampleID %in% ind2)
+
+expanded_training_data <- training_data %>%
+  left_join(kegg_data) %>%
+  inner_join(clinical_data) %>%
+  column_to_rownames(var = "SampleID")
+expanded_validation_data <- validation_data %>%
+  left_join(kegg_data) %>%
+  inner_join(clinical_data) %>%
+  column_to_rownames(var = "SampleID")
+
+testing_data <- s_toTest %>%
+  filter(growth_failure %in% "Yes") %>%
+  left_join(taxa_data, by = "SampleID") %>%
+  select(SampleID, DOL, Taxa, scaled_value) %>%
+  mutate(Taxa = str_replace_all(Taxa, " ", "_")) %>%
+  pivot_wider(names_from = "Taxa", values_from = "scaled_value", values_fill = 0)
+
+expanded_testing_data <- testing_data %>%
+  left_join(kegg_data) %>%
+  inner_join(clinical_data) %>%
+  column_to_rownames(var = "SampleID")
+
+```
+
+## Boruta
+
+We will use Boruta again:
+
+```{r}
+
+# set.seed(42)
+# boruta_model <- Boruta(DOL ~ ., data = expanded_training_data, doTrace = 2, maxRuns = 500)
+# save(boruta_model, file = here("Output_sensitivity", "boruta_model_taxa_and_more_noSubjectID.RData"))
+load(file = here("Output_sensitivity", "boruta_model_taxa_and_more_noSubjectID.RData"))
+
+print(boruta_model)
+
+```
+
+## The rf model
+
+```{r}
+set.seed(42)
+rf_model <- randomForest(DOL ~ ., data = expanded_training_data, localImp=T)
+rf_model_improved <- randomForest(expanded_training_data[,getSelectedAttributes(boruta_model)], expanded_training_data$DOL, localImp=T)
+
+rf_model_combined <- rf_model_improved
+
+print(rf_model)
+print(rf_model_improved)
+```
+
+## Plot of training data taxa and kegg
+
+Next, we can plot the predicted age of the samples vs. the actual age:
+
+```{r}
+
+plot_df <- tibble(class = "Regular growth", MMI = as.vector(rf_model_improved$predicted), actual_DOL = as.vector(rf_model_improved$y))
+
+growth_class_colors <- c("Regular growth" = "#446590FF")
+
+# nls = nonlinear least squares
+# SSlogis = Self-starting logistic model
+
+mod1 = nls(MMI ~ SSlogis(actual_DOL, Asym, xmid, scal), data=plot_df)
+# mod1
+
+plot_df %>%
+  ggplot(mapping = aes(x=actual_DOL, y=MMI, color=class)) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  geom_point() +
+  geom_smooth(
+    method = "nls", formula = y ~ SSlogis(x, Asym, xmid, scal),
+    se = FALSE
+  ) +
+  annotate(geom="text", x=10, y=70, label=glue("Logistic curve for normal growth:\n Horiz. asymptote={round(mod1$m$getPars()['Asym'],2)}\n  xmid={round(mod1$m$getPars()['xmid'],2)}\n  scale={round(mod1$m$getPars()['scal'],2)}"), color = "#446590FF", hjust = 0) +
+  coord_equal() +
+  scale_color_manual(values = growth_class_colors) +
+  labs(
+    y = "Predicted DOL",
+    x = "Actual DOL",
+    title = "Predicted age from microbiome abundances",
+    subtitle = "Curve represents self-starting logistic model"
+  )
+
+ggsave(here("Output_sensitivity", "random forest prediction for normal growth taxa and kegg.pdf"), height = 6, width = 5.4)
+
+```
+
+## Plot of all data taxa and kegg
+
+Finally, we can predict the microbiome age of babies with growth failure:
+
+```{r}
+p2 <- predict(rf_model_improved, expanded_testing_data)
+
+plot_df <- tibble(class = "Regular growth", MMI = as.vector(rf_model_improved$predicted), actual_DOL = as.vector(rf_model_improved$y), SampleID = rownames(expanded_training_data)) %>%
+  bind_rows(tibble(class = "Growth failure", MMI = as.vector(p2), actual_DOL = expanded_testing_data$DOL, SampleID = rownames(expanded_testing_data))) %>%
+  mutate(class = fct_relevel(class, "Regular growth"))
+
+growth_class_colors <- c("Regular growth" = "#446590FF", "Growth failure" = "#AD8152FF")
+
+mod2 = nls(MMI ~ SSlogis(actual_DOL, Asym, xmid, scal), data=plot_df %>% filter(class %in% "Growth failure"))
+# mod2
+
+# mod2 = nls(MMI ~ SSfpl(actual_DOL, A, B, xmid, scal), data=plot_df %>% filter(class %in% "Growth failure"))
+# weird error
+# Error in nls(y ~ cbind(1, 1/(1 + exp((xmid - x)/exp(lscal)))), data = xy,  : 
+#   step factor 0.000488281 reduced below 'minFactor' of 0.000976562
+# mod2
+
+for_save <- plot_df %>%
+  ggplot(mapping = aes(x=actual_DOL, y=MMI, color=class)) +
+  theme_bw() +
+  geom_point() +
+  annotate(geom="text", x=10, y=70, label=glue("Logistic curve for growth failure:\n Horiz. asymptote={round(mod2$m$getPars()['Asym'],2)}\n  xmid={round(mod2$m$getPars()['xmid'],2)}\n  scale={round(mod2$m$getPars()['scal'],2)}"), color = "#AD8152FF", hjust = 0) +
+  geom_smooth(
+    method = "nls", formula = y ~ SSlogis(x, Asym, xmid, scal),
+    se = FALSE
+  ) +
+  coord_equal() +
+  scale_color_manual(values = growth_class_colors) +
+  labs(
+    y = "Predicted DOL",
+    x = "Actual DOL",
+    title = "Predicted age from microbiome abundances",
+    subtitle = "Curves represents self-starting logistic model"
+  )
+
+ggsave(plot = for_save, here("Output_sensitivity", "random forest prediction for both growth legend taxa and kegg.pdf"), height = 6, width = 6)
+
+for_save + theme(legend.position = "none")
+
+ggsave(here("Output_sensitivity", "random forest prediction for both growth taxa and kegg.pdf"), height = 6, width = 5.4)
+
+no_formula <- plot_df %>%
+  ggplot(mapping = aes(x=actual_DOL, y=MMI, color=class)) +
+  theme_bw() +
+  geom_point() +
+  geom_smooth(
+    method = "nls", formula = y ~ SSlogis(x, Asym, xmid, scal),
+    se = FALSE
+  ) +
+  coord_equal() +
+  scale_color_manual(values = growth_class_colors) +
+  labs(
+    y = "Predicted day of life",
+    x = "Actual day of life",
+    color = "Type of growth"
+  )
+
+ggsave(plot = no_formula, here("Output_sensitivity", "random forest prediction for both growth legend taxa and kegg no formula.pdf"), height = 6, width = 6)
+
+```
+
+## Predicted minus actual
+
+```{r, fig.width=5, fig.height=3}
+
+plot_df$curve_value <- predict(mod1, newdata = plot_df)
+
+plot_df %<>%
+  mutate(RMMI = MMI - curve_value)
+
+plot_df %>%
+  ggplot(aes(x = class, y = RMMI)) +
+  geom_boxplot(outlier.alpha = 0) +
+  geom_quasirandom(dodge.width = 0.75, alpha = 0.25) +
+  labs(y = "Relative microbiome maturity index",
+    x = "")
+
+ggsave(filename = here("Output_sensitivity", "RMMI growth comparison all variables.pdf"), height = 3, width = 3)
+
+```
+
+### Mixed-effects model
+
+```{r, results='asis'}
+
+test_df <- plot_df %>%
+  left_join(s_toTest %>% select(SampleID, SubjectID), join_by(SampleID))
+
+tidy_lmer(nlme::lme(fixed = RMMI ~ class, random = ~ 1 | SubjectID, data = test_df)) %>% pander(digits=2, split.cells=15)
+
+```
+
+## ROC curves
+
+```{r}
+
+my_roc <- plot_df %>%
+  mutate(class = fct_relevel(class, "Regular growth")) %>%
+  roc(class ~ RMMI, data = .)
+
+plot(my_roc)
+# my_roc$specificities
+
+with(my_roc, data_frame(sensitivities, specificities, thresholds)) %>%
+  # mutate(thresholds = if_else(thresholds < 0.3, 0.3, thresholds)) %>%
+  # mutate(thresholds = if_else(thresholds > 0.53, 0.55, thresholds)) %>%
+  mutate(fpr = 1 - specificities, tpr = sensitivities) %>%
+  select(thresholds, tpr, fpr) %>%
+  gather(performance, value, -thresholds) %>%
+  ggplot() +
+  geom_step(aes(x=thresholds, y=value, color=performance)) +
+  labs(title = "Prediction of growth class based on RMMI",
+       y="False or True positive rate (fpr or tpr)",
+       x="RMMI threshold for predicting growth class")
+
+ggsave(filename = here::here("Output_sensitivity","TPFP curve for growth class mix of variables.pdf"), device = "pdf")
+
+```
+
+### AUROC and Gini
+
+Where AUROC is total area under the curve and Gini indexe is 2 X AUROC - 1. [See here for more](https://en.wikipedia.org/wiki/Receiver_operating_characteristic#Area_under_the_curve).
+
+Gini is more intuitive as 1 is a perfect model while 0 is no better than chance.
+
+```{r}
+
+auroc <- auc(my_roc)
+
+print(auroc)
+
+gini <- 2 * auroc - 1
+
+glue("Gini index is {round(gini,4)}")
+
+```
+
+## For validation set
+
+```{r, fig.width=5, fig.height=3}
+
+p3 <- predict(rf_model_improved, expanded_validation_data)
+
+plot_df <- tibble(class = "Training", MMI = as.vector(rf_model_improved$predicted), actual_DOL = as.vector(rf_model_improved$y), SampleID = rownames(expanded_training_data)) %>%
+  bind_rows(tibble(class = "Validation", MMI = as.vector(p3), actual_DOL = expanded_validation_data$DOL, SampleID = rownames(expanded_validation_data))) %>%
+  mutate(class = fct_relevel(class, "Training"))
+
+plot_df$curve_value <- predict(mod1, newdata = plot_df)
+
+plot_df %<>%
+  mutate(RMMI = MMI - curve_value)
+
+plot_df %>%
+  ggplot(aes(x = class, y = RMMI)) +
+  geom_boxplot(outlier.alpha = 0) +
+  geom_quasirandom(dodge.width = 0.75, alpha = 0.25)
+
+```
+
+### Mixed-effects model
+
+```{r, results='asis'}
+
+test_df <- plot_df %>%
+  left_join(s_toTest %>% select(SampleID, SubjectID), join_by(SampleID))
+
+tidy_lmer(nlme::lme(fixed = RMMI ~ class, random = ~ 1 | SubjectID, data = test_df)) %>% pander(digits=2, split.cells=15)
+
+```
+
+## Important variables
+
+```{r, fig.width=7, fig.height=5}
+
+varImpPlot(rf_model_improved, type = 1)
+
+dev.copy(pdf, here("Output_sensitivity", "importance_graph_kegg_taxa_clinical_var.pdf"))
+
+```
+
+```{r for Miren, eval=FALSE, include=FALSE}
+
+s2 %>%
+  select(SampleID, SubjectID, redcap_id, DOL) %>%
+  write_csv(here("Output_sensitivity", "for_miren.csv"))
+
+```
+
+# Random forest with just KEGG
+
+Here, we will just use the top 500 KEGG genes by mean abundance.
+
+```{r}
+
+top_kegg <- kegg_props %>%
+  group_by(geneID) %>%
+  summarise(frac_non_zero = sum(props > 0) / length(props), mean_prop = mean(props)) %>%
+  arrange(desc(mean_prop)) %>%
+  slice(1:500)
+
+kegg_data <- kegg_props %>%
+  filter(geneID %in% top_kegg$geneID)
+
+training_data <- kegg_data %>%
+  right_join(s_toTest %>% select(SampleID, growth_failure, DOL)) %>%
+  filter(growth_failure %in% "No") %>%
+  select(SampleID, geneID, props, DOL) %>%
+  pivot_wider(names_from = "geneID", values_from = "props", values_fill = 0)
+
+validation_data <- training_data %>% filter(SampleID %in% validation_samples) %>%
+  column_to_rownames(var = "SampleID")
+ind2 <- setdiff(training_data$SampleID, validation_data$SampleID)
+training_data <- training_data %>% filter(SampleID %in% ind2) %>%
+  column_to_rownames(var = "SampleID")
+
+testing_data <- kegg_data %>%
+  right_join(s_toTest %>% select(SampleID, growth_failure, DOL)) %>%
+  filter(growth_failure %in% "Yes") %>%
+  select(SampleID, geneID, props, DOL) %>%
+  pivot_wider(names_from = "geneID", values_from = "props", values_fill = 0) %>%
+  column_to_rownames(var = "SampleID")
+
+```
+
+## Boruta
+
+We will use Boruta again:
+
+```{r}
+
+# set.seed(42)
+# boruta_model <- Boruta(DOL ~ ., data = training_data, doTrace = 2, maxRuns = 500)
+# save(boruta_model, file = here("Output_sensitivity", "boruta_model_just_KEGG_noSubjectID.RData"))
+load(file = here("Output_sensitivity", "boruta_model_just_KEGG_noSubjectID.RData"))
+
+print(boruta_model)
+
+```
+
+## The rf model
+
+```{r}
+set.seed(42)
+rf_model <- randomForest(DOL ~ ., data = training_data, localImp=T)
+rf_model_improved <- randomForest(training_data[,getSelectedAttributes(boruta_model)], training_data$DOL, localImp=T)
+
+rf_model_just_kegg <- rf_model_improved
+
+print(rf_model)
+print(rf_model_improved)
+```
+
+## Plot of training data kegg
+
+Next, we can plot the predicted age of the samples vs. the actual age:
+
+```{r}
+
+plot_df <- tibble(class = "Regular growth", MMI = as.vector(rf_model_improved$predicted), actual_DOL = as.vector(rf_model_improved$y))
+
+growth_class_colors <- c("Regular growth" = "#446590FF")
+
+# nls = nonlinear least squares
+# SSlogis = Self-starting logistic model
+
+mod1 = nls(MMI ~ SSlogis(actual_DOL, Asym, xmid, scal), data=plot_df)
+# mod1
+
+plot_df %>%
+  ggplot(mapping = aes(x=actual_DOL, y=MMI, color=class)) +
+  theme_bw() +
+  theme(legend.position = "none") +
+  geom_point() +
+  geom_smooth(
+    method = "nls", formula = y ~ SSlogis(x, Asym, xmid, scal),
+    se = FALSE
+  ) +
+  annotate(geom="text", x=10, y=70, label=glue("Logistic curve for normal growth:\n Horiz. asymptote={round(mod1$m$getPars()['Asym'],2)}\n  xmid={round(mod1$m$getPars()['xmid'],2)}\n  scale={round(mod1$m$getPars()['scal'],2)}"), color = "#446590FF", hjust = 0) +
+  coord_equal() +
+  scale_color_manual(values = growth_class_colors) +
+  labs(
+    y = "Predicted DOL",
+    x = "Actual DOL",
+    title = "Predicted age from microbiome abundances",
+    subtitle = "Curve represents self-starting logistic model"
+  )
+
+ggsave(here("Output_sensitivity", "random forest prediction for normal growth kegg.pdf"), height = 6, width = 5.4)
+
+```
+
+## Plot of all data kegg
+
+Finally, we can predict the microbiome age of babies with growth failure:
+
+```{r}
+p2 <- predict(rf_model_improved, testing_data)
+
+plot_df <- tibble(class = "Regular growth", MMI = as.vector(rf_model_improved$predicted), actual_DOL = as.vector(rf_model_improved$y), SampleID = rownames(training_data)) %>%
+  bind_rows(tibble(class = "Growth failure", MMI = as.vector(p2), actual_DOL = testing_data$DOL, SampleID = rownames(testing_data))) %>%
+  mutate(class = fct_relevel(class, "Regular growth"))
+
+growth_class_colors <- c("Regular growth" = "#446590FF", "Growth failure" = "#AD8152FF")
+
+mod2 = nls(MMI ~ SSlogis(actual_DOL, Asym, xmid, scal), data=plot_df %>% filter(class %in% "Growth failure"))
+# mod2
+
+# mod2 = nls(MMI ~ SSfpl(actual_DOL, A, B, xmid, scal), data=plot_df %>% filter(class %in% "Growth failure"))
+# weird error
+# Error in nls(y ~ cbind(1, 1/(1 + exp((xmid - x)/exp(lscal)))), data = xy,  : 
+#   step factor 0.000488281 reduced below 'minFactor' of 0.000976562
+# mod2
+
+for_save <- plot_df %>%
+  ggplot(mapping = aes(x=actual_DOL, y=MMI, color=class)) +
+  theme_bw() +
+  geom_point() +
+  annotate(geom="text", x=10, y=70, label=glue("Logistic curve for growth failure:\n Horiz. asymptote={round(mod2$m$getPars()['Asym'],2)}\n  xmid={round(mod2$m$getPars()['xmid'],2)}\n  scale={round(mod2$m$getPars()['scal'],2)}"), color = "#AD8152FF", hjust = 0) +
+  geom_smooth(
+    method = "nls", formula = y ~ SSlogis(x, Asym, xmid, scal),
+    se = FALSE
+  ) +
+  coord_equal() +
+  scale_color_manual(values = growth_class_colors) +
+  labs(
+    y = "Predicted DOL",
+    x = "Actual DOL",
+    title = "Predicted age from microbiome abundances",
+    subtitle = "Curves represents self-starting logistic model"
+  )
+
+ggsave(plot = for_save, here("Output_sensitivity", "random forest prediction for both growth legend kegg.pdf"), height = 6, width = 6)
+
+for_save + theme(legend.position = "none")
+
+ggsave(here("Output_sensitivity", "random forest prediction for both growth kegg.pdf"), height = 6, width = 5.4)
+
+no_formula <- plot_df %>%
+  ggplot(mapping = aes(x=actual_DOL, y=MMI, color=class)) +
+  theme_bw() +
+  geom_point() +
+  geom_smooth(
+    method = "nls", formula = y ~ SSlogis(x, Asym, xmid, scal),
+    se = FALSE
+  ) +
+  coord_equal() +
+  scale_color_manual(values = growth_class_colors) +
+  labs(
+    y = "Predicted day of life",
+    x = "Actual day of life",
+    color = "Type of growth"
+  )
+
+ggsave(plot = no_formula, here("Output_sensitivity", "random forest prediction for both growth legend kegg no formula.pdf"), height = 6, width = 6)
+
+```
+
+## Predicted minus actual
+
+```{r, fig.width=5, fig.height=3}
+
+plot_df$curve_value <- predict(mod1, newdata = plot_df)
+
+plot_df %<>%
+  mutate(RMMI = MMI - curve_value)
+
+plot_df_kegg <- plot_df
+
+plot_df %>%
+  ggplot(aes(x = class, y = RMMI)) +
+  geom_boxplot(outlier.alpha = 0) +
+  geom_quasirandom(dodge.width = 0.75, alpha = 0.25) +
+  labs(y = "Relative microbiome maturity index",
+    x = "")
+
+ggsave(filename = here("Output_sensitivity", "RMMI growth comparison KEGG.pdf"), height = 3, width = 3)
+
+```
+
+### Mixed-effects model
+
+```{r, results='asis'}
+
+test_df <- plot_df %>%
+  left_join(s_toTest %>% select(SampleID, SubjectID), join_by(SampleID))
+
+tidy_lmer(nlme::lme(fixed = RMMI ~ class, random = ~ 1 | SubjectID, data = test_df)) %>% pander(digits=2, split.cells=15)
+
+```
+
+## ROC curves
+
+```{r}
+
+my_roc <- plot_df %>%
+  mutate(class = fct_relevel(class, "Regular growth")) %>%
+  roc(class ~ RMMI, data = .)
+
+plot(my_roc)
+# my_roc$specificities
+
+with(my_roc, data_frame(sensitivities, specificities, thresholds)) %>%
+  # mutate(thresholds = if_else(thresholds < 0.3, 0.3, thresholds)) %>%
+  # mutate(thresholds = if_else(thresholds > 0.53, 0.55, thresholds)) %>%
+  mutate(fpr = 1 - specificities, tpr = sensitivities) %>%
+  select(thresholds, tpr, fpr) %>%
+  gather(performance, value, -thresholds) %>%
+  ggplot() +
+  geom_step(aes(x=thresholds, y=value, color=performance)) +
+  labs(title = "Prediction of growth class based on RMMI",
+       y="False or True positive rate (fpr or tpr)",
+       x="RMMI threshold for predicting growth class")
+
+ggsave(filename = here::here("Output_sensitivity","TPFP curve for growth class just KEGG.pdf"), device = "pdf")
+
+```
+
+### AUROC and Gini
+
+Where AUROC is total area under the curve and Gini indexe is 2 X AUROC - 1. [See here for more](https://en.wikipedia.org/wiki/Receiver_operating_characteristic#Area_under_the_curve).
+
+Gini is more intuitive as 1 is a perfect model while 0 is no better than chance.
+
+```{r}
+
+auroc <- auc(my_roc)
+
+print(auroc)
+
+gini <- 2 * auroc - 1
+
+glue("Gini index is {round(gini,4)}")
+
+```
+
+## For validation set
+
+```{r, fig.width=5, fig.height=3}
+
+p3 <- predict(rf_model_improved, validation_data)
+
+plot_df <- tibble(class = "Training", MMI = as.vector(rf_model_improved$predicted), actual_DOL = as.vector(rf_model_improved$y), SampleID = rownames(training_data)) %>%
+  bind_rows(tibble(class = "Validation", MMI = as.vector(p3), actual_DOL = validation_data$DOL, SampleID = rownames(validation_data))) %>%
+  mutate(class = fct_relevel(class, "Training"))
+
+plot_df$curve_value <- predict(mod1, newdata = plot_df)
+
+plot_df %<>%
+  mutate(RMMI = MMI - curve_value)
+
+plot_df %>%
+  ggplot(aes(x = class, y = RMMI)) +
+  geom_boxplot(outlier.alpha = 0) +
+  geom_quasirandom(dodge.width = 0.75, alpha = 0.25)
+
+```
+
+### Mixed-effects model
+
+```{r, results='asis'}
+
+test_df <- plot_df %>%
+  left_join(s_toTest %>% select(SampleID, SubjectID), join_by(SampleID))
+
+tidy_lmer(nlme::lme(fixed = RMMI ~ class, random = ~ 1 | SubjectID, data = test_df)) %>% pander(digits=2, split.cells=15)
+
+```
+
+# End of report
+
+```{r savepoint, include=FALSE}
+
+save(rf_model_25taxa, rf_model_improved_78taxa, rf_model_combined, rf_model_just_kegg, plot_df_kegg, plot_df_25taxa, plot_df_78taxa, file = here("Output_sensitivity", "random_forest_models.RData"))
+
+save.image(file = here("Output_sensitivity", "after_random_forest_analysis.RData"))
+
+```
+
+
+```{r Generate time stamped report, eval=FALSE, include=FALSE}
+#notes
+#neat: you can run this following command in the console to give your reports custom names (or date-stamp them)
+#rmarkdown::render('ronen_stein_Report_shotgun.Rmd',output_file = paste('CEASE.report.', Sys.Date(), '.pdf', sep=''))
+
+rstudioapi::documentSaveAll()
+
+script_dir <- file.path("Scripts","Rmds", "sensitivity")
+output_dir <- file.path("Output_sensitivity")
+
+report_fp <- here::here(script_dir, "Shotgun_random_forest_analysis_gf10.Rmd")
+output_fp <- here::here(output_dir, paste('sagori_microbiome_and_random_forests_SSlogis_gf10_', Sys.Date(), '.pdf', sep=''))
+
+rmarkdown::render(report_fp, output_file = output_fp)
+
+```
