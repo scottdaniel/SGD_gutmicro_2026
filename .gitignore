@@ -36,6 +36,7 @@ rsconnect/
 .positai
 Output/
 Output_sensitivity/
+Output_bwtgt10/
 .DS_Store
 ~$*
 *.docx
