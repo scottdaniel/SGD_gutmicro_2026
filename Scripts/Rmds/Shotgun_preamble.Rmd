@@ -44,7 +44,7 @@ data_dir <- here("Data")
 min_reads <- 1000
 
 ### number of permutations for the PERMANOVA test
-perm <- 999 ## The number of permutations to do for PERMANOVA. You can start with 99 permutations to run faster while developing the code, then change it to 999 permutations for higher resolution.
+perm <- 99 ## The number of permutations to do for PERMANOVA. You can start with 99 permutations to run faster while developing the code, then change it to 999 permutations for higher resolution.
 
 ### rarefying subsample size 
 richness_subsample_size <- 1000
