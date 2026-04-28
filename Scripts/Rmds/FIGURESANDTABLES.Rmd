@@ -1,0 +1,1827 @@
+---
+title: |
+  ![](CHOPMC_logo.pdf){width=5in}
+  \break
+  Sagori Mukhopadhyay - Runs 1 to 5 - Figures and tables
+author: "Scott G. Daniel, PennCHOP Microbiome Program"
+date: "`r Sys.Date()`"
+geometry: margin=3cm
+output: 
+    pdf_document:
+        keep_tex: false
+        toc: true
+        toc_depth: 4
+---
+
+```{r setup, echo=FALSE}
+### ================
+###   knitr setup
+### ================
+library(knitr)
+opts_chunk$set(
+  tidy=FALSE,
+  cache=FALSE,
+  echo=FALSE,
+  warning=FALSE,
+  message=FALSE,
+  dpi=100,
+  fig.width=4,
+  fig.height=4,
+  fig.align = "center"
+  )
+```
+
+```{r libs and funcs, message=FALSE, warning=FALSE}
+
+library(here)
+library(tidyverse)
+library(qiimer)
+library(vegan)
+library(ape)
+library(usedist)
+
+## Visualization packages
+library(pander)
+library(kableExtra)
+
+library(pheatbuilder)
+library(ggbeeswarm)
+library(ggsci)
+library(viridis)
+library(RColorBrewer)
+
+# stats packages
+library(adonisplus)
+library(nlme)
+library(emmeans) # for lmer post-hoc tests
+library(broom)
+library(ghibli)
+library(glue)
+library(magrittr)
+select <- dplyr::select
+library(patchwork)
+library(qualpalr)
+library(randomForest)
+library(microbenchmark)
+library(Boruta)
+library(mlbench)
+library(caret)
+library(pROC)
+```
+
+```{r load data}
+
+load(file = here("Data","shotgun_data_2026-04-28.RData")) #source for raw data
+load(file = here("Data","sagori_taxonomic_data.RData")) #source for fixed s2 table
+load(file = here("Data","sagori_kegg_data.RData")) #source for gene abundance data
+table_export <- table_iterator()
+
+```
+
+```{r log variables}
+
+s2 %<>%
+  mutate(npo_days_prop_min = min(npo_days_prop[npo_days_prop > 0])) %>%
+  mutate(npo_days_prop = ifelse(npo_days_prop == 0, npo_days_prop_min/2, npo_days_prop)) %>%
+  mutate(log_npo_days_prop = log(npo_days_prop)) %>%
+  mutate(AbxHoursPerHOL_min = min(AbxHoursPerHOL[AbxHoursPerHOL > 0])) %>%
+  mutate(AbxHoursPerHOL = ifelse(AbxHoursPerHOL == 0, AbxHoursPerHOL_min/2, AbxHoursPerHOL)) %>%
+  mutate(log_AbxHoursPerHOL = log(AbxHoursPerHOL))
+
+```
+
+```{r moar colors}
+
+ann_colors <- list(category = c(`1` = "#66C2A5", `2` = "#FC8D62", `3` = "#8DA0CB"
+),
+growth_cat = c(normal = "#92BBD9FF", `mild retardation` = "#DCCA2CFF", 
+`moderate to severe retardation` = "#6FB382FF"),
+TimePoint = c(T0 = "#440154FF", 
+T1 = "#48186AFF", T2 = "#472D7BFF", T3 = "#424086FF", T4 = "#3B528BFF", 
+T5 = "#33638DFF", T6 = "#2C728EFF", T7 = "#26828EFF", T8 = "#21908CFF", 
+T9 = "#1F9F88FF", T10 = "#27AD81FF", T11 = "#3EBC74FF", T12 = "#5DC863FF", 
+T13 = "#82D34DFF", T14 = "#AADC32FF", T15 = "#D5E21AFF", T16 = "#FDE725FF"
+),
+growth_fail = c(No = "#9FCB6A", Yes = "#8367CC"),
+growth_label = c(None = "#92BBD9FF", Mild = "#DCCA2CFF", 
+`Moderate\nto severe` = "#6FB382FF"))
+
+```
+
+```{r sra upload}
+
+s2 %>% write_csv(here("all_the_samples.csv"))
+
+s_sra <- s2 %>%
+  filter(which_run %in% c("run4", "run5")) %>%
+  rename(sample_name = SampleID, collection_date = date_collected) %>%
+  mutate(collection_date = if_else(is.na(collection_date), "2019", collection_date)) %>%
+  mutate(collection_date = str_remove(collection_date, ".+/")) %>%
+  mutate(collection_date = if_else(str_length(collection_date) == 2, paste0("20", collection_date), collection_date)) %>%
+  mutate(host = "Homo sapiens") %>%
+  mutate(organism = "human gut metagenome") %>%
+  mutate(env_broad_scale = "dense settlement biome", env_local_scale = "human-associated environment", env_medium = "fecal material", geo_loc_name = "USA", lat_lon = "39.9473 N 75.1958 W") %>%
+  select(sample_name, organism, collection_date, env_broad_scale, env_local_scale, env_medium, geo_loc_name, host, lat_lon, WOL, host_sex = Sex, growth_failure, description = SampleType, log_npo_days_prop, log_AbxHoursPerHOL, growth_cat, bwt_z, PMA, DOL) %>%
+  group_by(growth_cat) %>%
+  mutate(replicate = paste0(growth_cat, row_number())) %>%
+  ungroup()
+
+s_sra %>%
+  write_tsv(file = here("Data","sample_table_for_sra.tsv"))
+
+sra_metadata <- read_csv(here("Data","sagori_run4_and_5_samples.csv"), col_names = c("sample_name","filename","filename2")) %>%
+  mutate(filename = str_replace(filename, "/scr1/users/danielsg/sagori_run_[45]/data_files/", "")) %>%
+  mutate(filename = str_replace(filename, "_R1", "_1")) %>%
+  mutate(filename2 = str_replace(filename2, "/scr1/users/danielsg/sagori_run_[45]/data_files/", "")) %>%
+  mutate(filename2 = str_replace(filename2, "_R2", "_2")) %>%
+  mutate(library_ID = str_replace(filename, "_1.fastq.gz", "")) %>%
+  right_join(s_sra, by = "sample_name") %>%
+  mutate(title = paste("DNA sequencing of gut bacteria in babies: ",replicate)) %>%
+  mutate(library_strategy = "WGS") %>%
+  mutate(library_source = "METAGENOMIC") %>%
+  mutate(library_selection = "RANDOM") %>%
+  mutate(library_layout = "paired") %>%
+  mutate(platform = "ILLUMINA") %>%
+  mutate(instrument_model = "Illumina HiSeq 2500") %>%
+  mutate(design_description = "Shotgun libraries were generated using the Nextera Flex Library Prep kit and sequenced on the Illumina HiSeq 2500 using 2x125 bp chemistry") %>%
+  mutate(filetype = "fastq")
+
+sra_metadata %>% select(sample_name, library_ID, title, library_strategy, library_source, library_selection, library_layout, platform, instrument_model, design_description, filetype, filename, filename2) %>%
+  write_tsv(file = here("Data","sra_metadata.tsv"))
+
+for_copying <- c(sra_metadata$filename, sra_metadata$filename2)
+write_lines(for_copying, file = here("Data","file_list_for_sra_upload.txt"))
+
+```
+
+# FIGURE 1B - Growth velocity and birthweight
+
+```{r}
+
+# s2 %>%
+#   write_csv(here("Output", "metadata_that_scott_has.csv"))
+
+#fixing npo_days_prop for s2
+# s2 %<>%
+#     mutate(npo_days_n = ifelse(SampleID %in% "SRC.738128", 1, npo_days_n)) %>%
+#   mutate(npo_days_n = ifelse(SampleID %in% "SRC.738559", 1, npo_days_n)) %>%
+#   mutate(npo_days_prop = npo_days_n / DOL) %>%
+#   mutate(npo_days_prop = ifelse(npo_days_prop == Inf, 1, npo_days_prop))
+
+fig1b_data <- s2 %>%
+  select(redcap_id, bwt_pct, GV_36wk, growth_cat, growth_failure) %>%
+  unique() %>%
+  mutate(growth_label = case_when(growth_cat %in% "normal" & growth_failure %in% "No" ~ "No failure, no faltering",
+                                  growth_cat %in% "mild retardation" & growth_failure %in% "No" ~ "No failure, mild faltering",
+                                  growth_cat %in% "moderate to severe retardation" & growth_failure %in% "No" ~ "No failure, sev faltering",
+                                  growth_cat %in% "normal" & growth_failure %in% "Yes" ~ "Failure, no faltering",
+                                  growth_cat %in% "mild retardation" & growth_failure %in% "Yes" ~ "Failure, mild faltering",
+                                  growth_cat %in% "moderate to severe retardation" & growth_failure %in% "Yes" ~ "Failure, sev faltering")) %>%
+  mutate(growth_label = fct_relevel(growth_label, "Failure, no faltering",
+                                    "Failure, mild faltering",
+                                    "Failure, sev faltering",
+                                    "No failure, no faltering",
+                                    "No failure, mild faltering",
+                                    "No failure, sev faltering"))
+
+growth_label_colors <- setNames(ghibli_palette(name = "PonyoMedium", n = 6, type = "discrete"), unique(fig1b_data$growth_label))
+
+growth_label_colors <- c(`No failure, mild faltering` = "#4C413FFF", `Failure, sev faltering` = "#EEBCB1FF", 
+`No failure, no faltering` = "#278B9AFF", `No failure, sev faltering` = "#B50A2AFF", 
+`Failure, no faltering` = "#DE7862FF", `Failure, mild faltering` = "#D8AF39FF"
+)
+
+fig1b_data %>%
+  ggplot(aes(x=bwt_pct, y=GV_36wk, colour = growth_label)) +
+  geom_point() +
+  scale_color_manual(values = growth_label_colors) +
+  theme_bw() +
+  labs(y = "Growth velocity at 36 weeks",
+       x = "Birthweight percentile",
+       color = "Growth failure and faltering")
+
+ggsave(here("Output", "FIG1B_GVandbwtpct.pdf"), width = 5, height = 3, useDingbats = F)
+
+```
+
+# FIGURE 1C - Alpha diversity
+
+```{r fig.width=8}
+
+s2 %>%
+  filter(!TimePoint %in% "T0") %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  filter(metric %in% "Shannon") %>%
+  ggplot(aes(x=WOL_label, y=alpha, fill = WOL_label)) +
+  #geom_boxplot(outlier.alpha=0) +
+  geom_boxplot() + #outlier.alpha=0
+  scale_fill_viridis_d(alpha = 0.8) +
+  # facet_grid(metric~., scales = "free") +
+  theme_bw() +
+  theme(
+    strip.background = element_blank(),
+    panel.grid=element_blank(),
+    legend.position = "none",
+    axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)
+  ) +
+  labs(
+    x="Week of life", color="",
+    y="Shannon diversity"
+  )
+
+ggsave(here("Output", "FIG1C_alphadiv_no_T0.pdf"), width = 2.5, height = 2.5, useDingbats = F)
+
+```
+
+\newpage
+## Linear model with just time
+
+```{r, results='asis'}
+my_formula <- "alpha ~ WOL"
+
+summaries_df <- s2 %>%
+  filter(!TimePoint %in% "T0") %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  group_by(metric) %>%
+  do(tidy_lmer(nlme::lme(as.formula(my_formula), random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = str_replace(term, "timepoint_numeric", "Time")) %>%
+  mutate(term = if_else(str_detect(term, "growth_cat"), str_remove(term, "growth_cat"), term))
+
+summaries_df %>%
+  pander(digits = 2, split.table = Inf, split.cells = 20, caption = glue("Linear model of the alpha diversity measurement with numeric time as the predictive variable. SubjectID added as a random effect. Full formula: {my_formula}"))
+```
+
+## Linear model with log(npo_days_prop) and bwt_z
+
+```{r, results='asis'}
+my_formula <- "alpha ~ bwt_z + WOL + log_npo_days_prop"
+
+summaries_df <- s2 %>%
+  filter(!TimePoint %in% "T0") %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  group_by(metric) %>%
+  do(tidy_lmer(nlme::lme(as.formula(my_formula), random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = str_replace(term, "timepoint_numeric", "Time")) %>%
+  mutate(term = if_else(str_detect(term, "growth_cat"), str_remove(term, "growth_cat"), term))
+
+summaries_df %>%
+  pander(digits = 2, split.table = Inf, split.cells = 20, caption = glue("Linear model of the alpha diversity measurement with numeric time and log_npo_days_prop as the predictive variables. SubjectID added as a random effect. Full formula: {my_formula}"))
+```
+
+
+## Linear model with log(AbxHoursPerHOL)
+
+```{r, results='asis'}
+my_formula <- "alpha ~ bwt_z + WOL + log_AbxHoursPerHOL"
+
+summaries_df <- s2 %>%
+  filter(!TimePoint %in% "T0") %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  group_by(metric) %>%
+  do(tidy_lmer(nlme::lme(as.formula(my_formula), random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = str_replace(term, "timepoint_numeric", "Time")) %>%
+  mutate(term = if_else(str_detect(term, "growth_cat"), str_remove(term, "growth_cat"), term))
+
+summaries_df %>%
+  pander(digits = 2, split.table = Inf, split.cells = 20, caption = glue("Linear model of the alpha diversity measurement with numeric time and log_AbxHoursPerHOL as the predictive variables. SubjectID added as a random effect. Full formula: {my_formula}"))
+```
+
+# FIGURE 1D - Beta-div. over time
+
+
+```{r fig.height=3, fig.width=5}
+s2 %>%
+  pcoaplus(bc) %>%
+  plot(color=WOL) +
+    scale_color_viridis_c() +
+    theme_bw() +
+    theme(
+      axis.text=element_blank(),
+      axis.ticks=element_blank(),
+      panel.grid = element_blank(), 
+      aspect.ratio = 1,
+      strip.background = element_blank()
+    ) + 
+    labs(color="Week of life", title="Bray-Curtis")
+
+ggsave(here("Output", "FIG1D_betadiv.pdf"), width = 5, height = 3, useDingbats = F)
+
+```
+
+## Permanova with just time
+
+```{r, results='asis'}
+
+# summaries_df <- 
+#   s2 %>%
+#     do(adonisplus(
+#       ., distmat = bc, formula = distmat ~ WOL,
+#       sample_id_var = SampleID, rep_meas_var = SubjectID,
+#       shuffle = c(WOL = "within"), permutations=perm)) %>%
+#   mutate(metric = "Bray-Curtis") %>%
+#   filter(!term %in% c("Residuals", "Total")) %>%
+#   select(-one_of(c("sumsq", "meansq"))) %>%
+#   select(metric, everything())
+# 
+# write_rds(summaries_df, here("FigureData", "permanova_results_01.rds"))
+
+summaries_df <- read_rds(here("FigureData", "permanova_results_01.rds"))
+
+summaries_df %>%
+  pander()
+
+```
+
+## Permanova with log_npo_days_prop
+
+```{r, results='asis'}
+
+# summaries_df <- 
+#   s2 %>%
+#     do(adonisplus(
+#       ., distmat = bc, formula = distmat ~ bwt_z + log_npo_days_prop + WOL,
+#       sample_id_var = SampleID, rep_meas_var = SubjectID,
+#       shuffle = c(WOL = "within", log_npo_days_prop = "within"), permutations=perm)) %>%
+#   mutate(metric = "Bray-Curtis") %>%
+#   filter(!term %in% c("Residuals", "Total")) %>%
+#   select(-one_of(c("sumsq", "meansq"))) %>%
+#   select(metric, everything())
+# 
+# write_rds(summaries_df, here("FigureData", "permanova_results_02.rds"))
+
+summaries_df <- read_rds(here("FigureData", "permanova_results_02.rds"))
+
+summaries_df %>%
+  pander()
+
+```
+
+## Permanova with log_AbxHoursPerHOL
+
+```{r, results='asis'}
+
+# summaries_df <- 
+#   s2 %>%
+#     do(adonisplus(
+#       ., distmat = bc, formula = distmat ~ bwt_z + log_AbxHoursPerHOL + WOL,
+#       sample_id_var = SampleID, rep_meas_var = SubjectID,
+#       shuffle = c(WOL = "within", log_AbxHoursPerHOL = "within"), permutations=perm)) %>%
+#   mutate(metric = "Bray-Curtis") %>%
+#   filter(!term %in% c("Residuals", "Total")) %>%
+#   select(-one_of(c("sumsq", "meansq"))) %>%
+#   select(metric, everything())
+# 
+# write_rds(summaries_df, here("FigureData", "permanova_results_03.rds"))
+
+summaries_df <- read_rds(here("FigureData", "permanova_results_03.rds"))
+
+summaries_df %>%
+  pander()
+
+```
+
+# FIGURE 1E
+
+Taxa abundance panel - Naomi is doing this
+
+# SUPP FIG 1A - alpha diversity growth faltering
+
+```{r fig.width=6}
+
+  # mutate(growth_label = case_when(growth_cat %in% "normal" ~ "Normal",
+  #                                 growth_cat %in% "mild retardation" ~ "Mild",
+  #                                 growth_cat %in% "moderate to severe retardation" ~ "Moderate to severe")) %>%
+
+s2 %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  filter(metric %in% "Shannon") %>%
+  mutate(growth_label = case_when(growth_cat %in% "normal" ~ "Normal",
+                                  growth_cat %in% "mild retardation" ~ "Mild",
+                                  growth_cat %in% "moderate to severe retardation" ~ "Moderate\nto severe")) %>%
+  mutate(growth_label = fct_relevel(growth_label, "Normal", "Mild")) %>%
+  ggplot(aes(x=growth_label, y=alpha, fill=WOL_label)) +
+  geom_boxplot() + #outlier.alpha=0
+  scale_fill_viridis_d(alpha = 0.8) +
+  # facet_grid(metric~., scales = "free") +
+  theme_bw() +
+  theme(
+    strip.background = element_blank(),
+    panel.grid=element_blank(),
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)
+  ) +
+  labs(
+    x="Growth faltering", color="Week of life",
+    y="Shannon diversity"
+  )
+
+ggsave(here("Output", "SUPP_FIG1A_alphadiv_gfalt.pdf"), width = 3.5, height = 2.5, useDingbats = F)
+
+```
+
+## Linear model with just growth faltering
+
+```{r, results='asis'}
+my_formula <- "alpha ~ growth_cat"
+
+summaries_df <- s2 %>%
+  filter(!TimePoint %in% "T0") %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  group_by(metric) %>%
+  do(tidy_lmer(nlme::lme(as.formula(my_formula), random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = str_replace(term, "timepoint_numeric", "Time")) %>%
+  mutate(term = if_else(str_detect(term, "growth_cat"), str_remove(term, "growth_cat"), term))
+
+summaries_df %>%
+  pander(digits = 2, split.table = Inf, split.cells = 20, caption = glue("Linear model of the alpha diversity measurement with growth_cat as the predictive variable. SubjectID added as a random effect. Full formula: {my_formula}"))
+```
+
+## Linear model with log_npo_days_prop
+
+```{r, results='asis'}
+my_formula <- "alpha ~ bwt_z + WOL * growth_cat + log_npo_days_prop"
+
+summaries_df <- s2 %>%
+  filter(!TimePoint %in% "T0") %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  group_by(metric) %>%
+  do(tidy_lmer(nlme::lme(as.formula(my_formula), random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = str_replace(term, "timepoint_numeric", "Time")) %>%
+  mutate(term = if_else(str_detect(term, "growth_cat"), str_remove(term, "growth_cat"), term))
+
+summaries_df %>%
+  pander(digits = 2, split.table = Inf, split.cells = 20, caption = glue("Linear model of the alpha diversity measurement with numeric time and growth categories as the predictive variables. SubjectID added as a random effect. Full formula: {my_formula}"))
+```
+
+
+## Linear model with log_AbxHoursPerHOL
+
+```{r, results='asis'}
+my_formula <- "alpha ~ bwt_z + WOL * growth_cat + log_AbxHoursPerHOL"
+
+summaries_df <- s2 %>%
+  filter(!TimePoint %in% "T0") %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  group_by(metric) %>%
+  do(tidy_lmer(nlme::lme(as.formula(my_formula), random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = str_replace(term, "timepoint_numeric", "Time")) %>%
+  mutate(term = if_else(str_detect(term, "growth_cat"), str_remove(term, "growth_cat"), term))
+
+summaries_df %>%
+  pander(digits = 2, split.table = Inf, split.cells = 20, caption = glue("Linear model of the alpha diversity measurement with numeric time and growth categories as the predictive variables. SubjectID added as a random effect. Full formula: {my_formula}"))
+```
+
+
+# SUPP FIG 1B - beta diversity growth faltering
+
+```{r fig.height=3, fig.width=5}
+s2 %>%
+  mutate(growth_label = case_when(growth_cat %in% "normal" ~ "None",
+                                  growth_cat %in% "mild retardation" ~ "Mild",
+                                  growth_cat %in% "moderate to severe retardation" ~ "Moderate\nto severe")) %>%
+  mutate(growth_label = fct_relevel(growth_label, "None", "Mild")) %>%
+  pcoaplus(bc) %>%
+  plot(color=growth_label) +
+    scale_color_manual(values=ann_colors$growth_label) +
+    theme_bw() +
+    theme(
+      axis.text=element_blank(),
+      axis.ticks=element_blank(),
+      panel.grid = element_blank(), 
+      aspect.ratio = 1,
+      strip.background = element_blank()
+    ) + 
+    labs(color="", title="")
+
+ggsave(here("Output", "SUPP_FIG1B_betadiv.pdf"), width = 3.5, height = 2.5, useDingbats = F)
+
+```
+
+## Permanova with growth_cat and time
+
+```{r, results='asis'}
+
+# summaries_df <- 
+#   s2 %>%
+#     do(adonisplus(
+#       ., distmat = bc, formula = distmat ~ growth_cat * WOL,
+#       sample_id_var = SampleID, rep_meas_var = SubjectID,
+#       shuffle = c(WOL = "within", growth_cat = "between"), permutations=perm)) %>%
+#   mutate(metric = "Bray-Curtis") %>%
+#   filter(!term %in% c("Residuals", "Total")) %>%
+#   select(-one_of(c("sumsq", "meansq"))) %>%
+#   select(metric, everything())
+# 
+# write_rds(summaries_df, here("FigureData", "permanova_results_04.rds"))
+
+summaries_df <- read_rds(here("FigureData", "permanova_results_04.rds"))
+
+summaries_df %>%
+  pander()
+
+```
+
+## Permanova with log_npo_days_prop
+
+```{r, results='asis'}
+
+# summaries_df <- 
+#   s2 %>%
+#     do(adonisplus(
+#       ., distmat = bc, formula = distmat ~ bwt_z + log_npo_days_prop + growth_cat * WOL,
+#       sample_id_var = SampleID, rep_meas_var = SubjectID,
+#       shuffle = c(WOL = "within", growth_cat = "between", log_npo_days_prop = "within"), permutations=perm)) %>%
+#   mutate(metric = "Bray-Curtis") %>%
+#   filter(!term %in% c("Residuals", "Total")) %>%
+#   select(-one_of(c("sumsq", "meansq"))) %>%
+#   select(metric, everything())
+# 
+# write_rds(summaries_df, here("FigureData", "permanova_results_05.rds"))
+
+summaries_df <- read_rds(here("FigureData", "permanova_results_05.rds"))
+
+summaries_df %>%
+  pander()
+
+```
+
+## Permanova with log_AbxHoursPerHOL
+
+```{r, results='asis'}
+
+# summaries_df <- 
+#   s2 %>%
+#     do(adonisplus(
+#       ., distmat = bc, formula = distmat ~ bwt_z + log_AbxHoursPerHOL + growth_cat * WOL,
+#       sample_id_var = SampleID, rep_meas_var = SubjectID,
+#       shuffle = c(WOL = "within", growth_cat = "between", log_AbxHoursPerHOL = "within"), permutations=perm)) %>%
+#   mutate(metric = "Bray-Curtis") %>%
+#   filter(!term %in% c("Residuals", "Total")) %>%
+#   select(-one_of(c("sumsq", "meansq"))) %>%
+#   select(metric, everything())
+# 
+# write_rds(summaries_df, here("FigureData", "permanova_results_06.rds"))
+
+summaries_df <- read_rds(here("FigureData", "permanova_results_06.rds"))
+
+summaries_df %>%
+  pander()
+
+```
+
+
+# SUPP FIG 1C - alpha diversity growth failure
+
+```{r fig.width=8}
+
+s2 %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  filter(metric %in% "Shannon") %>%
+  ggplot(aes(x=growth_failure, y=alpha, fill=WOL_label)) +
+  geom_boxplot() + #outlier.alpha=0
+  scale_fill_viridis_d(alpha = 0.8) +
+  # facet_grid(metric~., scales = "free") +
+  theme_bw() +
+  theme(
+    strip.background = element_blank(),
+    panel.grid=element_blank(),
+    legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)
+  ) +
+  labs(
+    x="Growth failure", color="Week of life",
+    y="Shannon diversity"
+  )
+
+ggsave(here("Output", "SUPP_FIG1C_alphadiv_gfail.pdf"), width = 3.5, height = 2.5, useDingbats = F)
+
+```
+
+## Linear model with just growth_failure
+
+```{r, results='asis'}
+my_formula <- "alpha ~ growth_failure"
+
+summaries_df <- s2 %>%
+  filter(!TimePoint %in% "T0") %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  group_by(metric) %>%
+  do(tidy_lmer(nlme::lme(as.formula(my_formula), random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = str_replace(term, "timepoint_numeric", "Time")) %>%
+  mutate(term = if_else(str_detect(term, "growth_cat"), str_remove(term, "growth_cat"), term))
+
+summaries_df %>%
+  pander(digits = 2, split.table = Inf, split.cells = 20, caption = glue("Linear model of the alpha diversity measurement with growth_failure as the predictive variable. SubjectID added as a random effect. Full formula: {my_formula}"))
+```
+
+## Linear model with log_npo_days_prop
+
+```{r, results='asis'}
+my_formula <- "alpha ~ bwt_z + WOL * growth_failure + log_npo_days_prop"
+
+summaries_df <- s2 %>%
+  filter(!TimePoint %in% "T0") %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  group_by(metric) %>%
+  do(tidy_lmer(nlme::lme(as.formula(my_formula), random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = str_replace(term, "timepoint_numeric", "Time")) %>%
+  mutate(term = if_else(str_detect(term, "growth_cat"), str_remove(term, "growth_cat"), term))
+
+summaries_df %>%
+  pander(digits = 2, split.table = Inf, split.cells = 20, caption = glue("Linear model of the alpha diversity measurement with numeric time and growth_failure as the predictive variables. SubjectID added as a random effect. Full formula: {my_formula}"))
+```
+
+
+## Linear model with log_AbxHoursPerHOL
+
+```{r, results='asis'}
+my_formula <- "alpha ~ bwt_z + WOL * growth_failure + log_AbxHoursPerHOL"
+
+summaries_df <- s2 %>%
+  filter(!TimePoint %in% "T0") %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  group_by(metric) %>%
+  do(tidy_lmer(nlme::lme(as.formula(my_formula), random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = str_replace(term, "timepoint_numeric", "Time")) %>%
+  mutate(term = if_else(str_detect(term, "growth_cat"), str_remove(term, "growth_cat"), term))
+
+summaries_df %>%
+  pander(digits = 2, split.table = Inf, split.cells = 20, caption = glue("Linear model of the alpha diversity measurement with numeric time and growth_failure as the predictive variables. SubjectID added as a random effect. Full formula: {my_formula}"))
+```
+
+
+
+# SUPP FIG 1D - beta diversity growth failure
+
+```{r fig.height=3, fig.width=5}
+s2 %>%
+  pcoaplus(bc) %>%
+  plot(color=growth_failure) +
+    scale_color_manual(values=ann_colors$growth_fail) +
+    theme_bw() +
+    theme(
+      axis.text=element_blank(),
+      axis.ticks=element_blank(),
+      panel.grid = element_blank(), 
+      aspect.ratio = 1,
+      strip.background = element_blank()
+    ) + 
+    labs(color="", title="")
+
+ggsave(here("Output", "SUPP_FIG1D_betadiv.pdf"), width = 3, height = 2.5, useDingbats = F)
+
+```
+
+## Permanova with growth_failure and time
+
+```{r, results='asis'}
+
+# summaries_df <- 
+#   s2 %>%
+#     do(adonisplus(
+#       ., distmat = bc, formula = distmat ~ growth_failure * WOL,
+#       sample_id_var = SampleID, rep_meas_var = SubjectID,
+#       shuffle = c(WOL = "within", growth_failure = "between"), permutations=perm)) %>%
+#   mutate(metric = "Bray-Curtis") %>%
+#   filter(!term %in% c("Residuals", "Total")) %>%
+#   select(-one_of(c("sumsq", "meansq"))) %>%
+#   select(metric, everything())
+# 
+# write_rds(summaries_df, here("FigureData", "permanova_results_07.rds"))
+
+summaries_df <- read_rds(here("FigureData", "permanova_results_07.rds"))
+
+summaries_df %>%
+  pander()
+
+```
+
+## Permanova with log_npo_days_prop
+
+```{r, results='asis'}
+
+# summaries_df <- 
+#   s2 %>%
+#     do(adonisplus(
+#       ., distmat = bc, formula = distmat ~ bwt_z + log_npo_days_prop + growth_failure * WOL,
+#       sample_id_var = SampleID, rep_meas_var = SubjectID,
+#       shuffle = c(WOL = "within", growth_failure = "between", log_npo_days_prop = "within"), permutations=perm)) %>%
+#   mutate(metric = "Bray-Curtis") %>%
+#   filter(!term %in% c("Residuals", "Total")) %>%
+#   select(-one_of(c("sumsq", "meansq"))) %>%
+#   select(metric, everything())
+# 
+# write_rds(summaries_df, here("FigureData", "permanova_results_08.rds"))
+
+summaries_df <- read_rds(here("FigureData", "permanova_results_08.rds"))
+
+summaries_df %>%
+  pander()
+
+```
+
+## Permanova with log_AbxHoursPerHOL
+
+```{r, results='asis'}
+
+# summaries_df <- 
+#   s2 %>%
+#     do(adonisplus(
+#       ., distmat = bc, formula = distmat ~ bwt_z + log_AbxHoursPerHOL + growth_failure * WOL,
+#       sample_id_var = SampleID, rep_meas_var = SubjectID,
+#       shuffle = c(WOL = "within", growth_failure = "between", log_AbxHoursPerHOL = "within"), permutations=perm)) %>%
+#   mutate(metric = "Bray-Curtis") %>%
+#   filter(!term %in% c("Residuals", "Total")) %>%
+#   select(-one_of(c("sumsq", "meansq"))) %>%
+#   select(metric, everything())
+# 
+# write_rds(summaries_df, here("FigureData", "permanova_results_09.rds"))
+
+summaries_df <- read_rds(here("FigureData", "permanova_results_09.rds"))
+
+summaries_df %>%
+  pander()
+
+```
+
+# SUPP FIGURE 4E - gene pathways abundance - growth faltering
+
+### Linear models of pathways
+
+```{r, results='asis'}
+
+number_of_top_pathways = 25
+
+props_toTest <- kegg_path_props %>%
+  mutate(props_log10 = log10(props)) %>%
+  mutate(PathwayName = fct_lump(PathwayName, n = number_of_top_pathways, w = .$props, other_level = "Other")) %>%
+  filter(!PathwayName %in% c("Metabolic pathways", "Other"))
+
+form1 = "props_log10 ~ bwt_z + WOL * growth_cat + log_npo_days_prop"
+random1 = "SubjectID"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "PathwayName", props_toTest = props_toTest, s_toTest = s2, form1 = form1, rep_mes_label = random1, p_cutoff =  0.05) 
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log10 transformed abundances of KEGG pathways"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+```
+
+```{r}
+
+pathways_to_select <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation")) %>%
+  pull(PathwayName) %>%
+  unique() %>%
+  as.character()
+
+plot_df <- props_toTest %>%
+  filter(PathwayName %in% pathways_to_select) %>%
+  left_join(s2, join_by(SampleID))
+
+g <- ggplot(plot_df, aes(x = props, y = PathwayName, color = growth_cat)) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  geom_boxplot(outlier.shape = 1, outlier.alpha = 0.5) +
+  scale_color_manual(values=ann_colors$growth_cat) +
+  labs(y = "KEGG pathway",
+       x = "Relative abundance",
+       color = "")
+
+plot(g)
+
+ggsave(here("Output", glue("SUPP_FIGURE_4E_growth_falt_kegg_pathway_abundance.pdf")), height = 2.75, width = 5)
+
+```
+
+# FIGURE 2B - gene pathways linear estimate of differences
+
+```{r}
+
+summaries_df <- run_lmer_on_props(factor_to_test = "PathwayName", props_toTest = props_toTest, s_toTest = s2, form1 = form1,rep_mes_label = random1, p_cutoff =  1)
+
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), PathwayName %in% pathways_to_select) %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(PathwayName = fct_reorder(PathwayName, -Value))
+
+g <- ggplot(plot_df, aes(Value, PathwayName, shape = Significant, color = term)) +
+  theme_bw() +
+  theme(legend.position = "bottom", legend.justification.bottom = "left", legend.direction = "vertical", legend.byrow = T) +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c(1,19)) +
+  scale_color_manual(values=ann_colors$growth_cat[2:3]) +
+  labs(y = "KEGG Pathway",
+       x = "",
+       shape = "Significance",
+       color = "Growth faltering")
+# <-- Decreased vs. normal growth    Increased vs. normal growth -->
+plot(g)
+
+ggsave(here("Output", glue("FIGURE_2B_growth_falt_kegg_pathway_difference.pdf")), height = 2.5, width = 5)
+
+pathways_from_fig_2B <- as.character(unique(plot_df$PathwayName))
+
+```
+
+# SUPP FIGURE 4F - gene pathways abundance - growth failure
+
+### Linear models of pathways
+
+```{r, results='asis'}
+
+number_of_top_pathways = 25
+
+props_toTest <- kegg_path_props %>%
+  mutate(props_log10 = log10(props)) %>%
+  mutate(PathwayName = fct_lump(PathwayName, n = number_of_top_pathways, w = .$props, other_level = "Other")) %>%
+  filter(!PathwayName %in% c("Metabolic pathways", "Other"))
+
+form1 = "props_log10 ~ bwt_z + WOL * growth_failure + log_npo_days_prop"
+random1 = "SubjectID"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "PathwayName", props_toTest = props_toTest, s_toTest = s2, form1 = form1, rep_mes_label = random1, p_cutoff =  0.05) 
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log10 transformed abundances of KEGG pathways"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+```
+
+```{r}
+
+pathways_to_select <- pathways_from_fig_2B
+
+plot_df <- props_toTest %>%
+  filter(PathwayName %in% pathways_to_select) %>%
+  left_join(s2, join_by(SampleID))
+
+g <- ggplot(plot_df, aes(x = props, y = PathwayName, color = growth_failure)) +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  geom_boxplot(outlier.shape = 1, outlier.alpha = 0.5) +
+  scale_color_manual(values=ann_colors$growth_fail) +
+  labs(y = "KEGG pathway",
+       x = "Relative abundance",
+       color = "")
+
+plot(g)
+
+ggsave(here("Output", glue("SUPP_FIGURE_4F_growth_failure_kegg_pathway_abundance.pdf")), height = 2.75, width = 5)
+
+```
+
+# FIGURE 2C - gene pathways linear estimate of differences
+
+```{r}
+
+summaries_df <- run_lmer_on_props(factor_to_test = "PathwayName", props_toTest = props_toTest, s_toTest = s2, form1 = form1,rep_mes_label = random1, p_cutoff =  1)
+
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes")) %>%
+  filter(PathwayName %in% pathways_to_select) %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(PathwayName = fct_reorder(PathwayName, -Value))
+
+g <- ggplot(plot_df, aes(Value, PathwayName, shape = Significant, color = term)) +
+  theme_bw() +
+  theme(legend.position = "bottom", legend.justification.bottom = "left", legend.direction = "vertical", legend.byrow = T) +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c(1,19)) +
+  scale_color_manual(values=ann_colors$growth_fail) +
+  labs(y = "KEGG Pathway",
+       x = "Change vs. normal growth",
+       shape = "Significance",
+       color = "Growth failure")
+# <-- Decreased vs. normal growth    Increased vs. normal growth -->
+plot(g)
+
+ggsave(here("Output", glue("FIGURE_2C_growth_failure_kegg_pathway_difference.pdf")), height = 2.5, width = 5)
+
+```
+
+# FIGURE 2A - just time and top 500 KEGG
+
+Just with time variable
+
+Taking the top 500 KEGG orthologs and testing them
+
+```{r message=FALSE, warning=FALSE, paged.print=TRUE, results='asis'}
+
+kegg_defnitions <- read_tsv(here("Data", "ko_definition.list"), col_names = c("Ortholog", "Definition")) %>%
+  mutate(Ortholog = str_remove(Ortholog, "ko:"))
+
+path_annotation <- prokarotic_paths %>%
+  select(Ortholog, PathwayName) %>%
+  group_by(Ortholog) %>%
+  summarise(Pathways = paste0(PathwayName, collapse = ", ")) %>%
+  ungroup()
+
+top500 <- kegg_props %>%
+  filter(SampleID %in% s2$SampleID) %>%
+  group_by(geneID) %>%
+  summarise(mean_props = mean(props)) %>%
+  arrange(desc(mean_props)) %>%
+  slice(1:500)
+
+kegg_props_subset <- kegg_props %>%
+  select(SampleID, Ortholog = geneID, count, props) %>%
+  filter(Ortholog %in% top500$geneID) %>%
+  mutate(props_log10 = log10(props))
+
+form1 = "props_log10 ~ WOL"
+random1 = "SubjectID"
+
+# summaries_df <- run_lmer_on_props(factor_to_test = "Ortholog", props_toTest = kegg_props_subset, s_toTest = s2, form1 = form1, p_cutoff = 1, rep_mes_label = random1)
+# 
+# save(summaries_df, file = here("Data", glue("just_time_kegg500_changes.RDS")))
+
+load(file = here("Data", glue("just_time_kegg500_changes.RDS")))
+  
+plot_df <- summaries_df %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  mutate(direction = case_when(Value > 0 ~ "Increased",
+                               Value < 0 ~ "Decreased")) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  tidyr::separate_wider_delim(cols = Definition, delim = ";", names = c("gene", "description")) %>%
+  mutate(ortho_lable = paste(Ortholog, gene))
+
+library(ggrepel)
+
+g <- ggplot(data=plot_df, aes(x=Value, y=-log10(fdr), col=direction, label = ortho_lable)) + 
+  geom_point() +
+  # geom_text_repel() +
+  theme_bw() +
+  geom_hline(yintercept=-log10(0.05), linetype = "longdash") +
+  scale_shape_manual(values = c(1,19)) +
+  # theme(legend.position = "none") +
+  labs(y = "-log10(fdr value)",
+       x = "Estimate of linear model",
+       color = "Change over time",
+       subtitle = "")
+#  (formula: log10(props) ~ WOL)
+#Dashed line represents fdr = 0.05
+
+plot(g)
+
+ggsave(here("Output", glue("FIGURE_2A_top_500_kegg_orthologs_just_time.pdf")), height = 2.25, width = 4)
+
+table_name <- "FIGURE_2A_top_500_kegg_orthologs_just_time.csv"
+
+my_table <- summaries_df %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  left_join(path_annotation, by = "Ortholog")
+
+write_csv(my_table, here("Output", table_name))
+
+print(glue("All orthologs saved together as {table_name}"))
+
+```
+
+# SUPP FIGURE 4C - Gfalt and Kegg terms
+
+FDR plot for growth faltering
+
+## With log_npo_days_prop
+
+```{r message=FALSE, warning=FALSE, paged.print=TRUE, results='asis'}
+
+form1 = "props_log10 ~ bwt_z + WOL * growth_cat + log_npo_days_prop"
+random1 = "SubjectID"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "Ortholog", props_toTest = kegg_props_subset, s_toTest = s2, form1 = form1, p_cutoff = 1, rep_mes_label = random1)
+
+to_select <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), fdr < 0.05) %>%
+  pull(Ortholog) %>%
+  as.character() %>%
+  unique()
+
+changed_in_gfalt <- to_select
+  
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), Ortholog %in% to_select) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  mutate(ortho_lable = paste(Ortholog, str_trunc(Definition, 30, "right"))) %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(ortho_lable = fct_reorder(ortho_lable, Value))
+
+g <- ggplot(plot_df, aes(Value, ortho_lable, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c(1,19)) +
+  scale_color_manual(values=ann_colors$growth_cat[2:3]) +
+    labs(y = "Ortholog / Description",
+       x = "<-- Decreased vs. normal growth    Increased vs. normal growth -->",
+       shape = "Significance",
+       color = "")
+
+plot(g)
+
+ggsave(here("Output", glue("SUPP_FIGURE_4C_growth_faltering_kegg500.pdf")), height = 2.5, width = 6.5)
+
+table_name <- glue("SUPP_FIGURE_4C_growth_faltering_kegg500.csv")
+
+my_table <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  filter(term %in% c("moderate to severe retardation", "mild retardation"), fdr < 0.05) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  left_join(path_annotation, by = "Ortholog")
+
+write_csv(my_table, here("Output", table_name))
+
+print(glue("All orthologs saved together as {table_name}"))
+
+```
+
+
+
+
+# SUPP FIGURE 4D - Gfailure and Kegg terms
+
+FDR plot for growth failure
+
+## With log_npo_days_prop
+
+```{r message=FALSE, warning=FALSE, paged.print=TRUE, results='asis'}
+
+form1 = "props_log10 ~ bwt_z + WOL * growth_failure + log_npo_days_prop"
+random1 = "SubjectID"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "Ortholog", props_toTest = kegg_props_subset, s_toTest = s2, form1 = form1, p_cutoff = 1, rep_mes_label = random1)
+  
+plot_df <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes"), Ortholog %in% c(changed_in_gfalt, "K00868")) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  mutate(ortho_lable = paste(Ortholog, str_trunc(Definition, 30, "right"))) %>%
+  mutate(CI95_lwr = round(Value - 1.96*Std.Error, 2)) %>%
+  mutate(CI95_upr = round(Value + 1.96*Std.Error, 2)) %>%
+  mutate(Significant = case_when(fdr < 0.05 ~ "p.adj < 0.05",
+                                 fdr > 0.05 ~ "Not significant")) %>%
+  arrange(Value) %>%
+  mutate(ortho_lable = fct_reorder(ortho_lable, Value))
+
+g <- ggplot(plot_df, aes(Value, ortho_lable, color = term, shape = Significant)) +
+  theme_bw() +
+  geom_pointrange(aes(xmin=Value-Std.Error, xmax=Value+Std.Error), position = position_dodge(width = 0.4)) +
+  geom_vline(xintercept = 0, linetype = "longdash") +
+  scale_shape_manual(values = c(1,19)) +
+  scale_color_manual(values=ann_colors$growth_fail) +
+    labs(y = "Ortholog / Description",
+       x = "<-- Decreased vs. normal growth    Increased vs. normal growth -->",
+       shape = "Significance",
+       color = "")
+
+plot(g)
+
+ggsave(here("Output", glue("SUPP_FIGURE_4D_growth_failure_kegg500.pdf")), height = 2.5, width = 6.5)
+
+table_name <- glue("SUPP_FIGURE_4D_growth_failure_kegg500.csv")
+
+my_table <- summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  filter(term %in% c("Yes"), Ortholog %in% changed_in_gfalt) %>%
+  left_join(kegg_defnitions, by = "Ortholog") %>%
+  left_join(path_annotation, by = "Ortholog")
+
+write_csv(my_table, here("Output", table_name))
+
+print(glue("All orthologs saved together as {table_name}"))
+
+```
+
+```{r}
+
+#all the orthologs
+actually_changed <- summaries_df %>%
+  filter(fdr < 0.05, term %in% "growth_failureYes")
+#K00868
+
+```
+
+# SUPP FIGURE 4A - venn diagram of kegg genes in growth faltering
+
+```{r}
+
+library(ggVennDiagram)
+
+kegg_pres_abs <- kegg_props_raw %>%
+  left_join(s2 %>% select(SampleID, growth_cat), join_by(SampleID)) %>%
+  group_by(growth_cat, geneID) %>%
+  summarise(present = ifelse(sum(count) > 0, "Present", "Absent"))
+
+venn_list <- list("Normal" = kegg_pres_abs %>% filter(growth_cat %in% "normal", present %in% "Present") %>% pull(geneID),
+                "Mild retardation" = kegg_pres_abs %>% filter(growth_cat %in% "mild retardation", present %in% "Present") %>% pull(geneID),
+                "Moderate to severe retardation" = kegg_pres_abs %>% filter(growth_cat %in% "moderate to severe retardation", present %in% "Present") %>% pull(geneID))
+
+ggVennDiagram(venn_list) +
+  scale_x_continuous(expand = expansion(mult = .2)) +
+  scale_fill_distiller(palette = "RdBu")
+
+ggsave(here("Output", "SUPP FIGURE 4A kegg genes shared among growth faltering.pdf"), height = 5, width = 6)
+
+```
+
+# SUPP FIGURE 4B - venn diagram of kegg genes in growth failure
+
+```{r}
+
+kegg_pres_abs <- kegg_props_raw %>%
+  left_join(s2 %>% select(SampleID, growth_failure), join_by(SampleID)) %>%
+  group_by(growth_failure, geneID) %>%
+  summarise(present = ifelse(sum(count) > 0, "Present", "Absent"))
+
+venn_list <- list("Yes" = kegg_pres_abs %>% filter(growth_failure %in% "Yes", present %in% "Present") %>% pull(geneID),
+                "No" = kegg_pres_abs %>% filter(growth_failure %in% "No", present %in% "Present") %>% pull(geneID))
+
+ggVennDiagram(venn_list) +
+  scale_x_continuous(expand = expansion(mult = .2)) +
+  scale_fill_distiller(palette = "RdBu")
+
+ggsave(here("Output", "SUPP FIGURE 4B kegg genes shared among growth failure.pdf"), height = 5, width = 6)
+
+```
+
+# Random Forests
+
+```{r load stuff}
+library(Boruta)
+library(mlbench)
+library(caret)
+library(pROC)
+
+load(file = here("Data", "random_forest_models.RData"))
+
+```
+
+```{r}
+
+top25 <- summed_props_long %>%
+  group_by(Taxa) %>%
+  summarise(mean_props = mean(props)) %>%
+  ungroup() %>%
+  arrange(desc(mean_props)) %>%
+  slice(1:29) %>%
+  filter(!str_detect(Taxa, "Ralstonia|Cutibacterium|Vibrio"))
+
+training_data <- s2 %>%
+  filter(growth_failure %in% "No") %>%
+  left_join(summed_props_long, by = "SampleID") %>%
+  filter(Taxa %in% top25$Taxa) %>%
+  select(SampleID, DOL, Taxa, props) %>% #SubjectID, 
+  mutate(Taxa = str_replace_all(Taxa, " ", "_")) %>%
+  pivot_wider(names_from = "Taxa", values_from = "props", values_fill = 0) %>%
+  column_to_rownames(var = "SampleID")
+
+set.seed(43)
+validation_babies <- sample(s2$SubjectID, 15)
+validation_samples <- s2 %>%
+  filter(growth_failure %in% "No") %>%
+  filter(SubjectID %in% validation_babies) %>%
+  pull(SampleID)
+
+validation_data <- training_data[validation_samples,]
+ind2 <- setdiff(rownames(training_data), rownames(validation_data))
+training_data <- training_data[ind2,]
+
+testing_data <- s2 %>%
+  filter(growth_failure %in% "Yes") %>%
+  left_join(summed_props_long, by = "SampleID") %>%
+  filter(Taxa %in% top25$Taxa) %>%
+  select(SampleID, DOL, Taxa, props) %>% #SubjectID, 
+  mutate(Taxa = str_replace_all(Taxa, " ", "_")) %>%
+  pivot_wider(names_from = "Taxa", values_from = "props", values_fill = 0) %>%
+  column_to_rownames(var = "SampleID")
+
+#sanity check, make sure same baby is not in both validation and training
+# samples_in_training <- rownames(training_data)
+# training_babies <- s2 %>%
+#   filter(SampleID %in% samples_in_training) %>%
+#   pull(SubjectID)
+# intersect(training_babies, validation_babies) #should be "character(0)"
+
+```
+
+# FIGURE 3A - rf model with 25 taxa
+
+```{r}
+
+rf_model_improved <- rf_model_25taxa
+
+p2 <- predict(rf_model_improved, testing_data)
+
+plot_df <- tibble(class = "Regular growth", MMI = as.vector(rf_model_improved$predicted), actual_DOL = as.vector(rf_model_improved$y), SampleID = rownames(training_data)) %>%
+  bind_rows(tibble(class = "Growth failure", MMI = as.vector(p2), actual_DOL = testing_data$DOL, SampleID = rownames(testing_data))) %>%
+  mutate(class = fct_relevel(class, "Regular growth"))
+
+growth_class_colors <- c("Regular growth" = "#9FCB6A", "Growth failure" = "#8367CC")
+
+# mod2 = nls(MMI ~ SSlogis(actual_DOL, Asym, xmid, scal), data=plot_df %>% filter(class %in% "Growth failure"))
+# mod2
+
+# mod2 = nls(MMI ~ SSfpl(actual_DOL, A, B, xmid, scal), data=plot_df %>% filter(class %in% "Growth failure"))
+# weird error
+# Error in nls(y ~ cbind(1, 1/(1 + exp((xmid - x)/exp(lscal)))), data = xy,  : 
+#   step factor 0.000488281 reduced below 'minFactor' of 0.000976562
+# mod2
+
+for_save <- plot_df %>%
+  ggplot(mapping = aes(x=actual_DOL, y=MMI, color=class)) +
+  theme_bw() +
+  geom_point() +
+  # annotate(geom="text", x=10, y=70, label=glue("Logistic curve for growth failure:\n Horiz. asymptote={round(mod2$m$getPars()['Asym'],2)}\n  xmid={round(mod2$m$getPars()['xmid'],2)}\n  scale={round(mod2$m$getPars()['scal'],2)}"), color = "#AD8152FF", hjust = 0) +
+  geom_smooth(
+    method = "nls", formula = y ~ SSlogis(x, Asym, xmid, scal),
+    se = FALSE
+  ) +
+  scale_color_manual(values = growth_class_colors) +
+  labs(
+    y = "Predicted DOL / microbiome maturity index (MMI)",
+    x = "Actual DOL",
+    color = "Class",
+    title = "",
+    subtitle = ""
+  )
+
+ggsave(plot = for_save, here("Output", "FIGURE 3A random forest prediction for both growth legend.pdf"), height = 3.5, width = 5)
+
+for_save + theme(legend.position = "none")
+
+ggsave(here("Output", "FIGURE 3A random forest prediction for both growth no legend.pdf"), height = 5.5, width = 10)
+
+```
+
+# FIGURE 3B - RMMI reg. growth vs. GF vs. validation
+
+```{r, fig.width=5, fig.height=3}
+
+# mod1 is the SSlogis model for class %in% "Regular growth"
+# mod2 is the SSlogis model for class %in% "Growth failure"
+
+reg_growth_df <- tibble(class = "Regular growth", MMI = as.vector(rf_model_improved$predicted), actual_DOL = as.vector(rf_model_improved$y))
+
+mod1 = nls(MMI ~ SSlogis(actual_DOL, Asym, xmid, scal), data=reg_growth_df)
+
+p3 <- predict(rf_model_improved, validation_data)
+
+plot_df <- plot_df %>%
+  bind_rows(tibble(class = "Validation", MMI = as.vector(p3), actual_DOL = validation_data$DOL, SampleID = rownames(validation_data))) %>%
+  mutate(class = fct_relevel(class, "Training"))
+
+plot_df$curve_value <- predict(mod1, newdata = plot_df)
+
+plot_df %<>%
+  mutate(RMMI = MMI - curve_value) %>%
+  mutate(class = fct_relevel(class, "Regular growth", "Growth failure"))
+
+plot_df %>%
+  ggplot(aes(x = class, y = RMMI, color = class)) +
+  geom_boxplot(outlier.alpha = 0) +
+  geom_quasirandom(dodge.width = 0.75, alpha = 0.25) +
+  theme_bw() +
+  scale_color_manual(values = growth_class_colors) +
+  theme(legend.position = "") +
+  labs(x = "Class", y = "Relative microbiota maturity index")
+
+ggsave(here("Output", "FIGURE 3B RMMI comparison.pdf"), height = 3, width = 4)
+
+```
+
+# TABLE 3C - Mixed-effects model for RMMI
+
+```{r, results='asis'}
+
+test_df <- plot_df %>%
+  left_join(s2 %>% select(SampleID, SubjectID), join_by(SampleID))
+
+summary_df <- tidy_lmer(nlme::lme(fixed = RMMI ~ class, random = ~ 1 | SubjectID, data = test_df)) 
+
+summary_df %>% pander(digits=2, split.cells=15)
+
+summary_df %>% write_csv(here("Output", "FIGURE 3B summary table.csv"))
+
+```
+
+# FIGURE 3C Top five features for each model
+
+```{r, fig.height=4, fig.width=8}
+
+imp <- importance(rf_model_25taxa, type = 1)
+imp_df_25taxa <- tibble(Feature = dimnames(imp)[[1]], MeanDecAccu = as.vector(imp)) %>%
+  mutate(model = "25 taxa")
+imp <- importance(rf_model_improved_78taxa, type = 1)
+imp_df_improved_78taxa <- tibble(Feature = dimnames(imp)[[1]], MeanDecAccu = as.vector(imp)) %>%
+  mutate(model = "71 taxa, boruta optimized")
+imp <- importance(rf_model_just_kegg, type = 1)
+imp_df_just_kegg <- tibble(Feature = dimnames(imp)[[1]], MeanDecAccu = as.vector(imp)) %>%
+  mutate(model = "165 KEGG genes, boruta optimized") %>%
+  left_join(kegg_defnitions, by = c("Feature"="Ortholog")) %>%
+  mutate(Feature = paste(Feature, str_trunc(Definition, 20, "right")))
+
+imp_df <- bind_rows(imp_df_25taxa, imp_df_improved_78taxa, imp_df_just_kegg) %>%
+  group_by(model) %>%
+  slice_max(n = 5, order_by = MeanDecAccu) %>%
+  ungroup() %>%
+  droplevels() %>%
+  mutate(Feature = str_remove(Feature, "[a-zA-Z]+?_")) %>%
+  mutate(Feature = str_replace(Feature, "_", " ")) %>%
+  mutate(Feature = fct_reorder(Feature, MeanDecAccu)) %>%
+  mutate(model = fct_relevel(model, "25 taxa", "71 taxa, boruta optimized"))
+
+imp_df %>%
+  ggplot(aes(x = MeanDecAccu, y = Feature)) +
+  facet_wrap(~model, ncol = 3, scales = "free_x", strip.position = "right") +
+  # facet_wrap(~model, ncol = 3, scales = "free_x", labeller = labeller(group = label_wrap_gen(width = 25))) +
+  geom_point() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)) +
+  labs(x = "Mean decrease in accuracy",
+       y = "Top 5 features in models")
+
+ggsave(here("Output", "FIGURE 3C Top 5 features.pdf"), height = 3, width = 5.5)
+
+```
+
+# FIGURE 3D
+
+```{r}
+
+roc25taxa <- plot_df_25taxa %>%
+  mutate(class = fct_relevel(class, "Regular growth")) %>%
+  roc(class ~ RMMI, data = .)
+
+roc78taxa <- plot_df_78taxa %>%
+  mutate(class = fct_relevel(class, "Regular growth")) %>%
+  roc(class ~ RMMI, data = .)
+
+rockegg <- plot_df_kegg %>%
+  mutate(class = fct_relevel(class, "Regular growth")) %>%
+  roc(class ~ RMMI, data = .)
+
+ggroc(list(`25 taxa`=roc25taxa, `71 taxa`=roc78taxa, `165 KEGG genes`=rockegg)) +
+  theme_bw() +
+  labs(title = "", color = "Model", y = "Sensitivity", x = "Specificity") +
+  geom_abline(slope = 1, intercept = c(1,0), lty = 2) +
+  scale_colour_aaas()
+
+ggsave(filename = here::here("Output","FIGURE 3D ROC curves.pdf"), device = "pdf", height = 3, width = 4)
+
+```
+
+# Supp Figure 3A - alpha diversity 0-21 day gfalt
+
+```{r fig.height=6, fig.width=8}
+
+s_toPlot <- s_toTest <- s2 %>%
+  filter(DOL < 22) %>%
+  droplevels()
+
+# WOL_colors <- setNames((viridis(length(levels(s2$WOL_label)), alpha = 0.8)), levels(s2$WOL_label))
+
+WOL_colors <- c(`1` = "#440154CC", `2` = "#481A6CCC", `3` = "#472F7DCC", `4` = "#414487CC")
+
+s_toPlot %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  filter(metric %in% "Shannon") %>%
+  mutate(growth_label = case_when(growth_cat %in% "normal" ~ "None",
+                                  growth_cat %in% "mild retardation" ~ "Mild",
+                                  growth_cat %in% "moderate to severe retardation" ~ "Moderate\nto severe")) %>%
+  mutate(growth_label = fct_relevel(growth_label, "None", "Mild")) %>%
+  ggplot(aes(x=growth_label, y=alpha, fill=WOL_label)) +
+  geom_boxplot() + #outlier.alpha=0
+  scale_fill_manual(values = WOL_colors) +
+  # facet_grid(metric~., scales = "free") +
+  theme_bw() +
+  theme(
+    strip.background = element_blank(),
+    panel.grid= element_blank(),
+    # legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)
+  ) +
+  labs(
+    x="Growth faltering", fill="Week of life",
+    y="Shannon diversity"
+  )
+
+ggsave(here("Output", "SUPP_FIG3A_alphadiv_gfalt.pdf"), width = 3.5, height = 2.5, useDingbats = F)
+
+```
+
+## Linear model with log_npo_days_prop
+
+```{r, results='asis'}
+my_formula <- "alpha ~ bwt_z + WOL * growth_cat + log_npo_days_prop"
+
+summaries_df <- s_toTest %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  group_by(metric) %>%
+  do(tidy_lmer(nlme::lme(as.formula(my_formula), random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = str_replace(term, "timepoint_numeric", "Time")) %>%
+  mutate(term = if_else(str_detect(term, "growth_cat"), str_remove(term, "growth_cat"), term))
+
+summaries_df %>%
+  pander(digits = 2, split.table = Inf, split.cells = 20, caption = glue("Linear model of the alpha diversity measurement with numeric time and growth categories as the predictive variables. SubjectID added as a random effect. Full formula: {my_formula}"))
+```
+
+# Supp Figure 3B - beta diversity 0-21 day gfalt
+
+```{r fig.height=3, fig.width=5}
+
+s_toPlot %>%
+  mutate(growth_label = case_when(growth_cat %in% "normal" ~ "None",
+                                  growth_cat %in% "mild retardation" ~ "Mild",
+                                  growth_cat %in% "moderate to severe retardation" ~ "Moderate\nto severe")) %>%
+  mutate(growth_label = fct_relevel(growth_label, "None", "Mild")) %>%
+  pcoaplus(bc) %>%
+  plot(color=growth_label) +
+    scale_color_manual(values=ann_colors$growth_label) +
+    theme_bw() +
+    theme(
+      axis.text=element_blank(),
+      axis.ticks=element_blank(),
+      panel.grid = element_blank(), 
+      aspect.ratio = 1,
+      strip.background = element_blank()
+    ) + 
+    labs(color="Growth faltering", title="")
+
+ggsave(here("Output", "SUPP_FIG3B_betadiv.pdf"), width = 3.5, height = 2.5, useDingbats = F)
+
+```
+
+## Permanova with log_npo_days_prop
+
+```{r, results='asis'}
+
+# summaries_df <-
+#   s_toTest %>%
+#     do(adonisplus(
+#       ., distmat = bc, formula = distmat ~ bwt_z + log_npo_days_prop + growth_cat * WOL,
+#       sample_id_var = SampleID, rep_meas_var = SubjectID,
+#       shuffle = c(WOL = "within", growth_cat = "between", log_npo_days_prop = "within"), permutations=perm)) %>%
+#   mutate(metric = "Bray-Curtis") %>%
+#   filter(!term %in% c("Residuals", "Total")) %>%
+#   select(-one_of(c("sumsq", "meansq"))) %>%
+#   select(metric, everything())
+# 
+# write_rds(summaries_df, here("FigureData", "permanova_results_10.rds"))
+
+summaries_df <- read_rds(here("FigureData", "permanova_results_10.rds"))
+
+summaries_df %>%
+  pander()
+
+```
+
+# Supp Figure 3C - alpha diversity 0-21 days gfail
+
+```{r}
+
+s_toPlot %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  filter(metric %in% "Shannon") %>%
+  ggplot(aes(x=growth_failure, y=alpha, fill=WOL_label)) +
+  geom_boxplot() + #outlier.alpha=0
+  scale_fill_manual(values = WOL_colors) +
+  # facet_grid(metric~., scales = "free") +
+  theme_bw() +
+  theme(
+    strip.background = element_blank(),
+    panel.grid=element_blank(),
+    # legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)
+  ) +
+  labs(
+    x="Growth failure", fill="Week of life",
+    y="Shannon diversity"
+  )
+
+ggsave(here("Output", "SUPP_FIG3C_alphadiv_gfail.pdf"), width = 3.5, height = 2.5, useDingbats = F)
+
+```
+
+## Linear model with log_npo_days_prop
+
+```{r, results='asis'}
+my_formula <- "alpha ~ bwt_z + WOL * growth_failure + log_npo_days_prop"
+
+summaries_df <- s_toTest %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  group_by(metric) %>%
+  do(tidy_lmer(nlme::lme(as.formula(my_formula), random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = str_replace(term, "timepoint_numeric", "Time")) %>%
+  mutate(term = if_else(str_detect(term, "growth_cat"), str_remove(term, "growth_cat"), term))
+
+summaries_df %>%
+  pander(digits = 2, split.table = Inf, split.cells = 20, caption = glue("Linear model of the alpha diversity measurement with numeric time and growth_failure as the predictive variables. SubjectID added as a random effect. Full formula: {my_formula}"))
+```
+
+# Supp Figure 3D - beta diversity 0-21 days gfail
+
+```{r}
+s_toPlot %>%
+  pcoaplus(bc) %>%
+  plot(color=growth_failure) +
+    scale_color_manual(values=ann_colors$growth_fail) +
+    theme_bw() +
+    theme(
+      axis.text=element_blank(),
+      axis.ticks=element_blank(),
+      panel.grid = element_blank(), 
+      aspect.ratio = 1,
+      strip.background = element_blank()
+    ) + 
+    labs(color="Growth failure", title="")
+
+ggsave(here("Output", "SUPP_FIG3D_betadiv.pdf"), width = 3, height = 2.5, useDingbats = F)
+```
+
+## Permanova with log_npo_days_prop
+
+```{r, results='asis'}
+
+# summaries_df <-
+#   s_toTest %>%
+#     do(adonisplus(
+#       ., distmat = bc, formula = distmat ~ bwt_z + log_npo_days_prop + growth_failure * WOL,
+#       sample_id_var = SampleID, rep_meas_var = SubjectID,
+#       shuffle = c(WOL = "within", growth_failure = "between", log_npo_days_prop = "within"), permutations=perm)) %>%
+#   mutate(metric = "Bray-Curtis") %>%
+#   filter(!term %in% c("Residuals", "Total")) %>%
+#   select(-one_of(c("sumsq", "meansq"))) %>%
+#   select(metric, everything())
+# 
+# write_rds(summaries_df, here("FigureData", "permanova_results_11.rds"))
+
+summaries_df <- read_rds(here("FigureData", "permanova_results_11.rds"))
+
+summaries_df %>%
+  pander()
+
+```
+
+# Supp Figure 3E - alpha diversity 34-37 weeks PMA gfalt
+
+```{r fig.height=6, fig.width=8}
+
+s_subset2 <- read_rds(here("Data", "subset_of_babies_great34wk_less37wk.rds"))
+
+s_toPlot <- s_toTest <- s2 %>%
+  filter(SampleID %in% s_subset2$SampleID) %>%
+  droplevels()
+
+# WOL_colors <- setNames((viridis(length(levels(s2$WOL_label)), alpha = 0.8)), levels(s2$WOL_label))
+
+WOL_colors <- c(`3` = "#472F7DCC", `4` = "#414487CC", 
+                `5` = "#39568CCC", `6` = "#31688ECC", `7` = "#2A788ECC", `8` = "#23888ECC", 
+                `9` = "#1F988BCC", `10` = "#22A884CC", `11` = "#35B779CC", `12` = "#54C568CC", 
+                `13` = "#7AD151CC"
+)
+
+s_toPlot %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  filter(metric %in% "Shannon") %>%
+  mutate(growth_label = case_when(growth_cat %in% "normal" ~ "None",
+                                  growth_cat %in% "mild retardation" ~ "Mild",
+                                  growth_cat %in% "moderate to severe retardation" ~ "Moderate\nto severe")) %>%
+  mutate(growth_label = fct_relevel(growth_label, "None", "Mild")) %>%
+  ggplot(aes(x=growth_label, y=alpha, fill=WOL_label)) +
+  geom_boxplot() + #outlier.alpha=0
+  scale_fill_manual(values = WOL_colors) +
+  # facet_grid(metric~., scales = "free") +
+  theme_bw() +
+  theme(
+    strip.background = element_blank(),
+    panel.grid= element_blank(),
+    # legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)
+  ) +
+  labs(
+    x="Growth faltering", fill="Week of life",
+    y="Shannon diversity"
+  )
+
+ggsave(here("Output", "SUPP_FIG3E_alphadiv_gfalt.pdf"), width = 3.5, height = 2.5, useDingbats = F)
+
+```
+
+## Linear model with log_npo_days_prop
+
+```{r, results='asis'}
+my_formula <- "alpha ~ bwt_z + WOL * growth_cat + log_npo_days_prop"
+
+summaries_df <- s_toTest %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  group_by(metric) %>%
+  do(tidy_lmer(nlme::lme(as.formula(my_formula), random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = str_replace(term, "timepoint_numeric", "Time")) %>%
+  mutate(term = if_else(str_detect(term, "growth_cat"), str_remove(term, "growth_cat"), term))
+
+summaries_df %>%
+  pander(digits = 2, split.table = Inf, split.cells = 20, caption = glue("Linear model of the alpha diversity measurement with numeric time and growth categories as the predictive variables. SubjectID added as a random effect. Full formula: {my_formula}"))
+```
+
+# Supp Figure 3F - beta diversity 34-37 weeks PMA gfalt
+
+```{r fig.height=3, fig.width=5}
+
+s_toPlot %>%
+  mutate(growth_label = case_when(growth_cat %in% "normal" ~ "None",
+                                  growth_cat %in% "mild retardation" ~ "Mild",
+                                  growth_cat %in% "moderate to severe retardation" ~ "Moderate\nto severe")) %>%
+  mutate(growth_label = fct_relevel(growth_label, "None", "Mild")) %>%
+  pcoaplus(bc) %>%
+  plot(color=growth_label) +
+    scale_color_manual(values=ann_colors$growth_label) +
+    theme_bw() +
+    theme(
+      axis.text=element_blank(),
+      axis.ticks=element_blank(),
+      panel.grid = element_blank(), 
+      aspect.ratio = 1,
+      strip.background = element_blank()
+    ) + 
+    labs(color="Growth faltering", title="")
+
+ggsave(here("Output", "SUPP_FIG3F_betadiv.pdf"), width = 3.5, height = 2.5, useDingbats = F)
+
+```
+
+## Permanova with log_npo_days_prop
+
+```{r, results='asis'}
+
+# summaries_df <-
+#   s_toTest %>%
+#     do(adonisplus(
+#       ., distmat = bc, formula = distmat ~ bwt_z + log_npo_days_prop + growth_cat * WOL,
+#       sample_id_var = SampleID, rep_meas_var = SubjectID,
+#       shuffle = c(WOL = "within", growth_cat = "between", log_npo_days_prop = "within"), permutations=perm)) %>%
+#   mutate(metric = "Bray-Curtis") %>%
+#   filter(!term %in% c("Residuals", "Total")) %>%
+#   select(-one_of(c("sumsq", "meansq"))) %>%
+#   select(metric, everything())
+# 
+# write_rds(summaries_df, here("FigureData", "permanova_results_12.rds"))
+
+summaries_df <- read_rds(here("FigureData", "permanova_results_12.rds"))
+
+summaries_df %>%
+  pander()
+
+```
+
+# Supp Figure 3G - alpha diversity 34-37 weeks PMA gfail
+
+```{r}
+
+s_toPlot %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  filter(metric %in% "Shannon") %>%
+  ggplot(aes(x=growth_failure, y=alpha, fill=WOL_label)) +
+  geom_boxplot() + #outlier.alpha=0
+  scale_fill_manual(values = WOL_colors) +
+  # facet_grid(metric~., scales = "free") +
+  theme_bw() +
+  theme(
+    strip.background = element_blank(),
+    panel.grid=element_blank(),
+    # legend.position = "none",
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1)
+  ) +
+  labs(
+    x="Growth failure", fill="Week of life",
+    y="Shannon diversity"
+  )
+
+ggsave(here("Output", "SUPP_FIG3G_alphadiv_gfail.pdf"), width = 3.5, height = 2.5, useDingbats = F)
+
+```
+
+## Linear model with log_npo_days_prop
+
+```{r, results='asis'}
+my_formula <- "alpha ~ bwt_z + WOL * growth_failure + log_npo_days_prop"
+
+summaries_df <- s_toTest %>%
+  pivot_longer(c("Richness", "Shannon"), names_to="metric", values_to="alpha") %>%
+  group_by(metric) %>%
+  do(tidy_lmer(nlme::lme(as.formula(my_formula), random=~1|SubjectID, data=., na.action=na.omit))) %>%
+  ungroup() %>%
+  filter(!grepl("Intercept", term)) %>%
+  mutate(term = str_replace(term, "timepoint_numeric", "Time")) %>%
+  mutate(term = if_else(str_detect(term, "growth_cat"), str_remove(term, "growth_cat"), term))
+
+summaries_df %>%
+  pander(digits = 2, split.table = Inf, split.cells = 20, caption = glue("Linear model of the alpha diversity measurement with numeric time and growth_failure as the predictive variables. SubjectID added as a random effect. Full formula: {my_formula}"))
+```
+
+# Supp Figure 3H - beta diversity 34-37 weeks PMA gfail
+
+```{r}
+s_toPlot %>%
+  pcoaplus(bc) %>%
+  plot(color=growth_failure) +
+    scale_color_manual(values=ann_colors$growth_fail) +
+    theme_bw() +
+    theme(
+      axis.text=element_blank(),
+      axis.ticks=element_blank(),
+      panel.grid = element_blank(), 
+      aspect.ratio = 1,
+      strip.background = element_blank()
+    ) + 
+    labs(color="Growth failure", title="")
+
+ggsave(here("Output", "SUPP_FIG3H_betadiv.pdf"), width = 3, height = 2.5, useDingbats = F)
+```
+
+## Permanova with log_npo_days_prop
+
+```{r, results='asis'}
+
+# summaries_df <-
+#   s_toTest %>%
+#     do(adonisplus(
+#       ., distmat = bc, formula = distmat ~ bwt_z + log_npo_days_prop + growth_failure * WOL,
+#       sample_id_var = SampleID, rep_meas_var = SubjectID,
+#       shuffle = c(WOL = "within", growth_failure = "between", log_npo_days_prop = "within"), permutations=perm)) %>%
+#   mutate(metric = "Bray-Curtis") %>%
+#   filter(!term %in% c("Residuals", "Total")) %>%
+#   select(-one_of(c("sumsq", "meansq"))) %>%
+#   select(metric, everything())
+# 
+# write_rds(summaries_df, here("FigureData", "permanova_results_13.rds"))
+
+summaries_df <- read_rds(here("FigureData", "permanova_results_13.rds"))
+
+summaries_df %>%
+  pander()
+
+```
+
+# End of report
+
+```{r Generate time stamped report, eval=FALSE, include=FALSE}
+#notes
+#neat: you can run this following command in the console to give your reports custom names (or date-stamp them)
+#rmarkdown::render('ronen_stein_Report_shotgun.Rmd',output_file = paste('CEASE.report.', Sys.Date(), '.pdf', sep=''))
+
+rstudioapi::documentSaveAll()
+
+script_dir <- file.path("Scripts","Rmds")
+output_dir <- file.path("Output")
+
+report_fp <- here::here(script_dir, "FIGURESANDTABLES.Rmd")
+output_fp <- here::here(output_dir, paste('sagori_microbiome_figures_and_tables_', Sys.Date(), '.pdf', sep=''))
+
+rmarkdown::render(report_fp, output_file = output_fp)
+
+```

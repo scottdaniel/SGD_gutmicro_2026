@@ -8,3 +8,6 @@ kegg_bc_permanova_results_0to21days.rds
 kegg_bc_permanova_results_0to21days_2.rds
 kegg_bc_permanova_results_34to37weeks.rds
 kegg_bc_permanova_results_34to37weeks_gf.rds
+file_list_for_sra_upload.txt
+sample_table_for_sra.tsv
+sra_metadata.tsv
