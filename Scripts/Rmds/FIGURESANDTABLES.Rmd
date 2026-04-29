@@ -3,7 +3,7 @@ title: |
   ![](CHOPMC_logo.pdf){width=5in}
   \break
   Sagori Mukhopadhyay - Runs 1 to 5 - Figures and tables
-author: "Scott G. Daniel, PennCHOP Microbiome Program"
+author: "Scott G. Daniel & Naomi G. Wilson; PennCHOP Microbiome Program"
 date: "`r Sys.Date()`"
 geometry: margin=3cm
 output: 
@@ -67,6 +67,18 @@ library(Boruta)
 library(mlbench)
 library(caret)
 library(pROC)
+
+cut_MONTH_timepoints <- function(DOL) {
+  breakpoints <- c(0,27,55,83,111)
+  my_labels <- c(1,2,3,4)
+  cut(DOL, breaks = breakpoints, labels = my_labels, include.lowest = T, right = T)
+}
+
+cut_timepoints <- function(DOL) {
+  breakpoints <- c(0,6,13,20,27,34,41,48,55,62,69,76,83,90,97,104,111)
+  my_labels <- c(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16)
+  cut(DOL, breaks = breakpoints, labels = my_labels, include.lowest = T, right = T)
+}
 ```
 
 ```{r load data}
@@ -109,8 +121,6 @@ growth_label = c(None = "#92BBD9FF", Mild = "#DCCA2CFF",
 ```
 
 ```{r sra upload}
-
-s2 %>% write_csv(here("all_the_samples.csv"))
 
 s_sra <- s2 %>%
   filter(which_run %in% c("run4", "run5")) %>%
@@ -1806,6 +1816,2515 @@ summaries_df %>%
   pander()
 
 ```
+
+
+
+```{r load data2}
+
+load(file = here("Data", "sagori_metabolomics_data.RData"))
+table_export <- table_iterator()
+holupdates <- read.delim(file = here("Data", "stool_sequenced_update_20250829.txt"), sep = "\t")
+
+s2 <- s2 %>%
+  dplyr::rename(HOL_old=HOL) %>%
+  left_join(holupdates %>% select(!HOL) %>% dplyr::rename(HOL=HOL_New) %>% mutate(redcap_id=as.character(redcap_id)), by = c("redcap_id", "SampleID")) %>%
+  mutate(DOL=HOL/24) %>%
+  mutate(WOL=as.numeric(cut_timepoints(DOL)),
+         MOL=as.numeric(cut_MONTH_timepoints(DOL))) %>%
+  mutate(growth_cat_old=growth_cat) #%>% 
+  # mutate(growth_cat = factor(x = growth_cat_old, levels = c("normal", "mild retardation", "moderate to severe retardation"), labels = c("normal", "faltering", "faltering"))) # testing with faltering collapsed into normal vs. any faltering (mild or mod2sev)
+
+s_toTest <- s2
+ann_colors = list(
+  category = setNames(brewer.pal(length(levels(s_toTest$category)), "Set2"), levels(s_toTest$category)),
+  growth_cat = setNames(as.character(ghibli_palette("YesterdayMedium", direction = -1)[1:length(levels(s_toTest$growth_cat))]), levels(s_toTest$growth_cat)),
+  TimePoint = setNames(viridis(length(levels(s_toTest$TimePoint))), levels(s_toTest$TimePoint)),
+  growth_failure = setNames(qualpal(2)$hex, levels(s_toTest$growth_failure))
+)
+```
+
+\newpage
+# ~ TAXA ~
+# FIGURE 1E  
+
+Taxa abundance panel  
+```{r fig1d, fig.height = 2, fig.width=4, dpi=300}
+study_group_var <- "WOL"
+is_virus <- grepl("Viruses", adf$Kingdom)
+is_archaea <- grepl("Archaea", adf$Kingdom)
+is_euk <- grepl("Eukaryota", adf$Kingdom)
+deleteme = is_archaea | is_virus | is_euk
+adf_special <- adf[!deleteme,]
+counts_no_viruses <- counts[!deleteme,]
+# order matters here. do more specific first:
+adf_special <- adf_special %>%
+  mutate(RANK = ifelse(Genus=="Staphylococcus", "Staphylococcus", ifelse(Genus=="Bifidobacterium", "Bifidobacterium", ifelse(Family=="Enterobacteriaceae", "Enterobacteriaceae", ifelse(Family == "Enterococcaceae", "Enterococcaceae", ifelse(Family=="Clostridiaceae", "Clostridiaceae", Phylum)))))) %>%
+    mutate(RANK=ifelse(is.na(RANK), Phylum, RANK))
+
+a_special <- simplify_assignments(adf_special, rank1="Phylum", rank2="RANK")
+summed_cts_special <- rowsum(counts_no_viruses, a_special)
+summed_props_special <- sweep(summed_cts_special, 2, colSums(summed_cts_special), "/")
+
+s_subset <- s2 %>%
+  # filter(!TimePoint %in% "T0") %>%
+  select(SampleID, DOL, WOL, PMA, sample_type=SampleType, subject_id=SubjectID, TimePoint, study_day)
+# all(colnames(summed_props_g) %in% unique(s2$SampleID, s$SampleID))
+
+# Top 4 Phyla plus highlighted families or genera or classes within:
+plotme2 = summed_props_special %>% 
+  as.data.frame() %>% 
+  rownames_to_column("Taxa") %>% 
+  mutate(Taxa=ifelse(Taxa=="Proteobacteria Proteobacteria", "Other Proteobacteria", ifelse(Taxa=="Firmicutes Firmicutes", "Other Firmicutes", ifelse(Taxa=="Actinobacteria Actinobacteria", "Other Actinobacteria", ifelse(Taxa=="Bacteroidetes Bacteroidetes", "Bacteroidetes", ifelse(Taxa %in% c("Firmicutes Staphylococcus", "Actinobacteria Bifidobacterium", "Proteobacteria Enterobacteriaceae", "Firmicutes Lachnospiraceae", "Firmicutes Ruminococcaceae", "Firmicutes Enterococcaceae", "Firmicutes Clostridiaceae", "Firmicutes Bacilli"), Taxa, "Other Phyla")))))) %>%
+  # filter(Taxa != "Bacteria unclassified") %>%  #!grepl(pattern = "Other", x = Taxa), 
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  right_join(s_subset, by="SampleID") %>%
+
+  group_by(SampleID, Taxa, sample_type, subject_id, !!sym(study_group_var)) %>%
+  summarize(sumprops = sum(props, na.rm = T), meanprops=mean(props, na.rm=T), sdprops=sd(props, na.rm = T), n=n()) %>%
+  ungroup() %>%
+  # mutate(se=sdprops/sqrt(n)) %>%
+  # mutate(Taxa2 = fct_lump(Taxa, 30, w=sumprops, other_level = "Other Bacteria")) 
+  # mutate(Taxa = reorder(Taxa, sumprops))
+  mutate(Taxa = factor(Taxa, levels = c("Proteobacteria Enterobacteriaceae", "Other Proteobacteria", "Firmicutes Staphylococcus", "Firmicutes Enterococcaceae", "Firmicutes Clostridiaceae", "Other Firmicutes", "Actinobacteria Bifidobacterium", "Other Actinobacteria", "Bacteroidetes", "Other Phyla"), labels = c("Enterobacteriaceae", "Other Proteobacteria", "Staphylococcus", "Enterococcaceae", "Clostridiaceae", "Other Firmicutes", "Bifidobacterium", "Other Actinobacteria", "Bacteroidetes", "Other Phyla")))
+
+ann_colors2 = factor_palette(plotme2$Taxa, ggsci::pal_d3("category10")(10)[c(1,2,3,4,5,6,7,9,10,8)])
+
+library(scales)
+
+plotme2 %>% 
+  ggplot(aes(x=get(study_group_var), y=sumprops)) +
+    geom_smooth(aes(group=Taxa, color=Taxa), alpha=0.2, size=0.5) + 
+    scale_color_manual(values = ann_colors2) +
+    scale_x_continuous(expand=c(0,0)) +
+    theme_bw() +
+    scale_y_continuous(labels = scales::percent, limit=c(0,NA), oob=squish, expand = c(0.01,0)) +
+      coord_cartesian(clip = "off") +
+    theme(
+      # smaller verion:
+      # legend.position.inside = c(0.57,.5),
+      # legend.position = "inside", 
+      
+      # bottom legend version:
+      # legend.position = "bottom", 
+      
+      # right legend version:
+      legend.position = "right", 
+      
+      legend.key.size = unit(c(0.13), units = "in"),
+      legend.background = element_rect(fill = NA), 
+      legend.text = element_text(size=8),
+      legend.title=element_blank(),
+      panel.grid = element_blank(),
+      axis.ticks = element_line(linewidth = 0.3),
+      panel.border = element_rect(linewidth = 0.3),
+      axis.text = element_text(colour = "black", size=8)
+      ) +
+    guides(color=guide_legend(ncol=1, override.aes = list(lwd= 1, fill=NA))) +
+    labs(x=study_group_var, y="Relative abundance", fill="")
+
+ggsave(here("Output", "FIG1E_taxaRA_WOL_smooth_rightsidekey.pdf"), width = 4, height = 2, useDingbats = F, dpi = 400)
+# ggsave(here("Output", "FIG1E_taxaRA_WOL_smooth_smaller.pdf"), width = 4, height = 3, useDingbats = F, dpi = 400)
+```
+
+\newpage
+Taxa boxplots
+```{r fig.width=10, fig.height=8}
+minRAmean = 0.01
+genus_plot <- data.frame(summed_props) %>%
+  rownames_to_column("Taxa") %>%
+  mutate(Taxa = gsub("  ", "", Taxa)) %>%
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  right_join(s_subset, by = "SampleID") %>%
+  group_by(Taxa, sample_type) %>%
+    mutate(sumprops=sum(props), meanprops=mean(props), maxprops=max(props)) %>%
+  ungroup() %>%
+  filter(sumprops>0, meanprops>minRAmean) 
+
+# genus_plot %>%
+#   mutate(Taxalabel = str_wrap(as.character(Taxa), width = 25)) %>%
+#   ggplot(aes(x=WOL, y=props, fill=WOL, group = WOL)) +
+#   geom_boxplot(outlier.size = 0.25, outlier.shape = 21) +
+#   facet_wrap(~Taxalabel, ncol=4, scales="free_y") +
+#   scale_fill_viridis_c(alpha=0.8) +
+#   scale_y_continuous(transform = "log10") +
+#   theme_bw() +
+#   theme(panel.grid = element_blank(), strip.background = element_blank())
+```
+
+\newpage
+# FIGURE 1F  
+## Linear model  
+Taxa change with age  
+```{r}
+ps=1e-6
+props_toTest <- data.frame(summed_props) %>%
+  rownames_to_column("Taxa") %>%
+  mutate(Taxa = gsub("  ", "", Taxa)) %>%
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  filter(Taxa %in% unique(genus_plot$Taxa)) %>%
+  mutate(log10_props = log10(props+ps))
+
+props_toTest_g <- data.frame(summed_props_g) %>%
+  rownames_to_column("Taxa") %>%
+  mutate(Taxa = gsub("  ", "", Taxa)) %>%
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  left_join(s %>% select(SampleID, SampleType), by = "SampleID") %>%
+  mutate(present=props>0) %>%
+  filter(SampleType=="Feces") %>%
+  group_by(Taxa, SampleType) %>%
+    mutate(sumprops=sum(props), meanprops=mean(props), maxprops=max(props), presence=sum(present)/dim(summed_props_g)[2]) %>%
+  ungroup() %>%
+  filter(sumprops>0, meanprops>minRAmean) %>%
+  mutate(log10_props = log10(props+ps)) %>%
+  select(!SampleType)
+
+form1 = "log10_props ~ WOL"
+# form2 = "log10_props ~ WOL * growth_cat + npo_days_prop"
+# form3 = "log10_props ~ WOL * growth_cat + AbxHoursPerHOL"
+random1 = "subject_id"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "Taxa", props_toTest = props_toTest, s_toTest = s_subset, form1 = form1, rep_mes_label = random1, p_cutoff =  0.05) 
+
+summaries_df %>%
+  # mutate(term = str_remove(term, "growth_cat")) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log10 transformed relative abundance of genera. Filtered with p.value < 0.05. SubjectID added as a random effect. Full formula: {form1}"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+table_export(summaries_df, "taxonomic_analysis_table_")
+
+```
+
+```{r fig1f, fig.width=8, fig.height=4}
+minRAmean = 0.01
+sigtaxa = summaries_df %>% filter(fdr<0.05, term=="WOL") %>% pull(Taxa)
+genus_plot %>%
+  filter(Taxa %in% sigtaxa) %>%
+  filter(!(Taxa %in% c("Proteobacteria Klebsiella", "Proteobacteria Enterobacter", "Proteobacteria Enterobacterales", "Proteobacteria Enterobacteriaceae"))) %>% # show only taxa that were classified to the species level for main text figure
+  # filter(!(Taxa %in% c("Proteobacteria Klebsiella", "Proteobacteria Enterobacter", "Proteobacteria Enterobacterales", "Proteobacteria Enterobacteriaceae", "Proteobacteria Citrobacter freundii", "Proteobacteria Klebsiella aerogenes"))) %>% # show only taxa that were classified to the species level for main text figure, and Scott asked me to drop the last 2 for final figure edits
+   mutate(Taxalabel = str_wrap(paste0(word(as.character(Taxa)), ": ", word(as.character(Taxa), start = 2, end = -1)), width = 15)) %>%
+ 
+  left_join(summaries_df %>% 
+              filter(term=="WOL") %>% 
+              mutate(q_label = ifelse(fdr>=0.05, "n.s.", ifelse(fdr<0.0001, 
+                                      paste0("q=", scientific(fdr, digits = 2)), paste0("q=", as.character(signif(fdr, digits = 2)))))), by="Taxa") %>%
+  group_by(Taxa) %>% mutate(max=max(props), min=min(props)) %>% ungroup() %>%
+  ggplot(aes(x=WOL, y=props, fill=WOL, group = WOL)) +
+    geom_boxplot(outlier.size = 1, outlier.shape = 21,
+                 position=position_dodge(0.25), lwd=0.25, outlier.color = NA) +
+    geom_text(mapping = aes(label = q_label, x=12, y=10), size = 3, check_overlap = T) +
+    facet_wrap(~Taxalabel, ncol=6) +
+    scale_fill_viridis_c(alpha=0.8) +
+    # scale_fill_manual(values = ann_colors$growth_cat) +
+    scale_y_continuous(expand = c(0, 0.5), transform = "log10") +
+    theme_bw() +
+    labs(y="Relative abundance (log scale)", fill="WOL", x="WOL") +
+    theme(panel.grid = element_blank(), strip.background = element_blank())
+  
+ggsave(here("Output", "FIG1F_taxaRA_fdr05_WOL_boxplots.pdf"), width=8, height = 4, useDingbats = F, dpi = 600)
+```
+
+# SUPP FIGURE 1E  
+
+\newpage
+## Linear model  
+Taxa change with age  
+```{r}
+minRAmean = 0.01
+s_subset <- s2 %>%
+  # filter(!TimePoint %in% "T0") %>%
+  select(SampleID, WOL, PMA, growth_cat, growth_failure, sample_type=SampleType, subject_id=SubjectID, TimePoint, study_day)
+
+# sigtaxa = summaries_df %>% filter(fdr<0.05, term=="WOL") %>% pull(Taxa)
+plotme <- data.frame(summed_props) %>%
+    rownames_to_column("Taxa") %>%
+    mutate(Taxa = gsub("  ", "", Taxa)) %>%
+    pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+    right_join(s_subset, by = "SampleID") %>%
+    group_by(Taxa, sample_type) %>%
+      mutate(sumprops=sum(props), meanprops=mean(props), maxprops=max(props)) %>%
+    ungroup() %>%
+    filter(sumprops>0, meanprops>minRAmean) %>%
+    mutate(Taxalabel = paste0(word(as.character(Taxa)), " -\n", 
+                              word(as.character(Taxa), start = 2, end = -1))) 
+ps=1e-6
+props_toTest <- data.frame(summed_props) %>%
+  rownames_to_column("Taxa") %>%
+  mutate(Taxa = gsub("  ", "", Taxa)) %>%
+  pivot_longer(-Taxa, names_to="SampleID", values_to="props") %>%
+  filter(Taxa %in% unique(plotme$Taxa)) %>%
+  mutate(log10_props = log10(props+ps))
+
+form1 = "log10_props ~ WOL"
+# form2 = "log10_props ~ WOL * growth_cat + npo_days_prop"
+# form3 = "log10_props ~ WOL * growth_cat + AbxHoursPerHOL"
+random1 = "subject_id"
+
+# summaries_df <- run_lmer_on_props(factor_to_test = "Taxa", props_toTest = props_toTest, s_toTest = s_subset, form1 = form1, rep_mes_label = random1, p_cutoff =  0.05) 
+
+summaries_df <- props_toTest %>%
+  right_join(s_subset, by = "SampleID") %>%
+  group_by(Taxa, growth_cat) %>%
+  do(tidy_lmer(nlme::lme(as.formula(form1), random = as.formula(paste("~ 1 |", random1)), data=., na.action=na.omit))) %>%
+    ungroup() %>%
+    filter(term != '(Intercept)') %>%
+    group_by(term) %>%
+    mutate(fdr = p.adjust(p.value, method="BH")) %>%
+    ungroup() 
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  # mutate(term = str_remove(term, "growth_cat")) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log10 transformed relative abundance of genera. Filtered with p.value < 0.05. SubjectID added as a random effect. Full formula: {form1}"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+table_export(summaries_df, "taxonomic_analysis_table_")
+``` 
+
+```{r sfig1e, fig.width=8, fig.height=16}
+sigtaxa = summaries_df %>% filter(fdr<0.05, term=="WOL") %>% pull(Taxa)
+plotme %>% filter(Taxa %in% sigtaxa) %>%
+  # filter(!(Taxa %in% c("Proteobacteria Klebsiella", "Proteobacteria Enterobacter", "Proteobacteria Enterobacterales", "Proteobacteria Enterobacteriaceae"))) %>% # show only taxa that were classified to the species level for main text figure
+  left_join(summaries_df %>% 
+              filter(term=="WOL") %>% 
+              mutate(q_label = ifelse(fdr>=0.05, "n.s.", ifelse(fdr<0.0001, 
+                                      paste0("q=", scientific(fdr, digits = 2)), paste0("q=", as.character(signif(fdr, digits = 2)))))), by = c("Taxa", "growth_cat") ) %>%
+  group_by(Taxa) %>% mutate(max=max(props), min=min(props)) %>% ungroup() %>%
+  mutate(growth_cat = factor(growth_cat,levels = c("normal", "mild retardation", "moderate to severe retardation"), labels = c("None", "Mild", "Moderate to\nsevere"))) %>%
+  ggplot(aes(x=growth_cat, y=props+ps)) +
+    geom_boxplot(aes(fill=factor(WOL)), outlier.size = 0.5, outlier.shape = 21,
+                 position=position_dodge(0.9), lwd=0.25, outlier.color = NA) +
+    geom_text(mapping = aes(label = q_label, x=growth_cat, y=10), size = 3, check_overlap = T) +
+    facet_wrap(~Taxalabel, ncol=2) +
+    scale_fill_viridis_d(alpha=0.8, guide="none") +
+    # scale_fill_manual(values = ann_colors$growth_cat) +
+    scale_y_continuous(expand = c(0, 0.5), transform = "log10") +
+    theme_bw() +
+    labs(y="Relative abundance (log scale)", fill="WOL", x="Growth category") +
+    theme(panel.grid = element_blank(), strip.background = element_blank())
+
+ggsave(here("Output", "SUPP_FIG1E_taxaRA_growthcat_WOL_boxplots.pdf"), width =8, height = 16, useDingbats = F, dpi = 600)
+```
+
+
+\newpage
+# SUPP FIGURE 1F  
+## Linear model  
+Taxa change with age  
+```{r}
+form1 = "log10_props ~ WOL"
+# form2 = "log10_props ~ WOL * growth_cat + npo_days_prop"
+# form3 = "log10_props ~ WOL * growth_cat + AbxHoursPerHOL"
+random1 = "subject_id"
+# summaries_df <- run_lmer_on_props(factor_to_test = "Taxa", props_toTest = props_toTest, s_toTest = s_subset, form1 = form1, rep_mes_label = random1, p_cutoff =  0.05) 
+
+summaries_df <- props_toTest %>%
+  right_join(s_subset, by = "SampleID") %>%
+  group_by(Taxa, growth_failure) %>%
+  do(tidy_lmer(nlme::lme(as.formula(form1), random = as.formula(paste("~ 1 |", random1)), data=., na.action=na.omit))) %>%
+    ungroup() %>%
+    filter(term != '(Intercept)') %>%
+    group_by(term) %>%
+    mutate(fdr = p.adjust(p.value, method="BH")) %>%
+    ungroup() 
+
+summaries_df %>%
+  filter(p.value<0.05) %>%
+  # mutate(term = str_remove(term, "growth_cat")) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log10 transformed relative abundance of genera. Filtered with p.value < 0.05. SubjectID added as a random effect. Full formula: {form1}"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+table_export(summaries_df, "taxonomic_analysis_table_")
+``` 
+
+```{r fig.width=8, fig.height=16}
+sigtaxa = summaries_df %>% filter(fdr<0.05, term=="WOL") %>% pull(Taxa)
+plotme %>% filter(Taxa %in% sigtaxa) %>%
+  # filter(!(Taxa %in% c("Proteobacteria Klebsiella", "Proteobacteria Enterobacter", "Proteobacteria Enterobacterales", "Proteobacteria Enterobacteriaceae"))) %>% # show only taxa that were classified to the species level for main text figure
+  left_join(summaries_df %>% 
+              filter(term=="WOL") %>% 
+              mutate(q_label = ifelse(fdr>=0.05, "n.s.", ifelse(fdr<0.0001, 
+                                      paste0("q=", scientific(fdr, digits = 2)), paste0("q=", as.character(signif(fdr, digits = 2)))))), by = c("Taxa", "growth_failure") ) %>%
+  group_by(Taxa) %>% mutate(max=max(props), min=min(props)) %>% ungroup() %>%
+  ggplot(aes(x=growth_failure, y=props)) +
+    geom_boxplot(aes(fill=factor(WOL)), outlier.size = 0.5, outlier.shape = 21,
+                 position=position_dodge(0.9), lwd=0.25, outlier.color = NA) +
+    geom_text(mapping = aes(label = q_label, x=growth_failure, y=10), size = 3, check_overlap = T) +
+  # plotme %>%
+  # ggplot(aes(x=growth_failure, y=props)) +
+  #   geom_boxplot(aes(fill=factor(WOL)), outlier.size = 0.5, outlier.shape = 21) +
+    # geom_text(mapping = aes(label = paste0("q=", scientific(fdr, digits = 2)), x=12, y=max*0.96), size = 3, check_overlap = T) +
+    facet_wrap(~Taxalabel, ncol=2) +
+    scale_fill_viridis_d(alpha=0.8) +
+    # scale_fill_manual(values = ann_colors$growth_cat) +
+    scale_y_continuous(expand = c(0, 0.5), transform = "log10") +
+    theme_bw() +
+    labs(y="Relative abundance (log scale)", fill="WOL", x="Growth failure") +
+    theme(panel.grid = element_blank(), strip.background = element_blank())
+
+ggsave(here("Output", "SUPP_FIG1F_taxaRA_growthfail_WOL_boxplots.pdf"), width =8, height = 16, useDingbats = F, dpi = 600)
+```
+
+## Week by week  
+### SPECIES
+Is there a week where the groups diverge?  
+Asterisk/star for fdr-adjusted p-value<0.05. Diamond for p-unadjusted<0.05  
+Linear models were used to estimate the differences between study groups at each week of life. The relative abundances were log10 transformed. Multiple tests were adjusted for false discovery rate using Benjamini-Hochberg method. Only the terms with p<0.1 are shown in the table below.
+
+Growth Faltering:  
+```{r fig.height=9, fig.width=8}
+myform="log10_props ~ study_group"
+
+summaries_df <- props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, WOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  group_by(WOL, Taxa, study_group, sample_type) %>%
+    mutate(mean=mean(log10_props)) %>%
+  ungroup() %>%
+  
+  group_by(Taxa) %>% mutate(max=max(mean)) %>% ungroup() %>%
+  
+  group_by(Taxa, WOL) %>%
+    mutate(ngroups=n_distinct(study_group)) %>%
+  ungroup() %>%
+  
+  filter(ngroups>=2) %>% # Only test PMA_rounded where you have both study groups
+  
+  group_by(Taxa, WOL, max) %>%
+    do(tidy(lm(as.formula(myform), data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "", term)) %>%
+  
+  group_by(term, WOL) %>%
+    mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, WOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  # mutate(Taxa = reorder(Taxa, -log10_props)) %>%
+  # mutate(Taxa = fct_relabel(Taxa, function(x) gsub(" ", "\n", x))) %>%
+  group_by(WOL, Taxa, study_group, sample_type) %>%
+    summarise(mean=mean(log10_props), sd=sd(log10_props), n=n(), max=max(log10_props)) %>%
+  ungroup() %>%
+  mutate(se=sd/sqrt(n)) %>%
+  ggplot(aes(y=10^(mean), x=WOL)) +
+    # geom_vline(aes(xintercept = PMA_rounded), lwd=0.3, color="grey") + # guide lines
+    geom_line(aes(color=study_group, group = study_group)) +  
+    geom_point(aes(color=study_group)) +
+    geom_point(data = summaries_df %>% filter(fdr<0.1, term==levels(s2$growth_cat)[2]), mapping = aes(x=WOL, y=10^max +.2, color=term), shape=8) +
+    geom_point(data = summaries_df %>% filter(fdr>=0.1, p.value<0.05, term==levels(s2$growth_cat)[2]), mapping = aes(x=WOL, y=10^max +.2, color=term), shape=23) +
+
+    geom_point(data = summaries_df %>% filter(fdr<0.1, term==levels(s2$growth_cat)[3]), mapping = aes(color=term, x=WOL, y=10^max +.4), shape=8) +
+    geom_point(data = summaries_df %>% filter(p.value<0.05, fdr>=0.1, term==levels(s2$growth_cat)[3]), mapping = aes(color=term, x=WOL, y=10^max +.4), shape=23) +
+    scale_color_manual(values = ann_colors$growth_cat) +
+    scale_y_continuous(transform = "log10", labels = scales::percent) +
+    theme_bw() +
+  theme(legend.position = "bottom") +
+    theme(panel.grid = element_blank()) +
+    geom_errorbar(aes(ymin = 10^(mean-se), ymax=10^(mean+se), color=study_group), alpha=0.5, width = 0.3) +
+    facet_wrap(~Taxa, ncol=3, scales="free") +
+  labs(y="Concentration (umol/g log-scale)")
+
+# table_export(summaries_df, "Taxonomic_table_export")
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  pander(split.tab=Inf, emphasize.strong.rows = which(.$fdr<=0.05)) #%>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+
+rm(myform)
+```
+
+Growth Failure:  
+Asterisk/star for fdr-adjusted p-value<0.05. Diamond for p-unadjusted<0.05  
+```{r fig.height=9, fig.width=8}
+myform="log10_props ~ study_group"
+
+summaries_df <- props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, WOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  group_by(WOL, Taxa, study_group, sample_type) %>%
+    mutate(mean=mean(log10_props)) %>%
+  ungroup() %>%
+  
+  group_by(Taxa) %>% mutate(max=max(mean)) %>% ungroup() %>%
+  
+  group_by(Taxa, WOL) %>%
+    mutate(ngroups=n_distinct(study_group)) %>%
+  ungroup() %>%
+  
+  filter(ngroups>=2) %>% # Only test PMA_rounded where you have both study groups
+  
+  group_by(Taxa, WOL, max) %>%
+    do(tidy(lm(as.formula(myform), data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "", term)) %>%
+  
+  group_by(term, WOL) %>%
+    mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, WOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  # mutate(Taxa = reorder(Taxa, -log10_props)) %>%
+  # mutate(Taxa = fct_relabel(Taxa, function(x) gsub(" ", "\n", x))) %>%
+  group_by(WOL, Taxa, study_group, sample_type) %>%
+    summarise(mean=mean(log10_props), sd=sd(log10_props), n=n(), max=max(log10_props)) %>%
+  ungroup() %>%
+  mutate(se=sd/sqrt(n)) %>%
+  ggplot(aes(y=10^(mean), x=WOL)) +
+    # geom_vline(aes(xintercept = PMA_rounded), lwd=0.3, color="grey") + # guide lines
+    geom_line(aes(color=study_group, group = study_group)) +  
+    geom_point(aes(color=study_group)) +
+    geom_point(data = summaries_df %>% filter(fdr<0.05), mapping = aes(x=WOL, y=10^max +.2, color=term), shape=8) +
+    geom_point(data = summaries_df %>% filter(fdr>0.05, p.value<0.05), mapping = aes(x=WOL, y=10^max +.2, color=term), shape=23) +
+    # geom_point(data = summaries_df %>% filter(p.value<0.05, term=="moderate to severe retardation"), mapping = aes(color=term, x=WOL, y=10^max +.4), shape=8) +
+    scale_color_manual(values = ann_colors$growth_failure) +
+    scale_y_continuous(transform = "log10", labels = scales::percent) +
+    theme_bw() +
+  theme(legend.position = "bottom") +
+    theme(panel.grid = element_blank()) +
+    geom_errorbar(aes(ymin = 10^(mean-se), ymax=10^(mean+se), color=study_group), alpha=0.5, width = 0.3) +
+    facet_wrap(~Taxa, ncol=3, scales="free") +
+  labs(y="Concentration (umol/g log-scale)")
+
+# table_export(summaries_df, "Taxonomic_table_export")
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  pander(split.tab=Inf, emphasize.strong.rows = which(.$fdr<=0.05)) #%>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+
+rm(myform)
+```
+
+
+### GENUS  
+Growth Faltering:  
+```{r fig.height=9, fig.width=8}
+myform="log10_props ~ study_group"
+
+summaries_df <- props_toTest_g %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, WOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  group_by(WOL, Taxa, study_group, sample_type) %>%
+    mutate(mean=mean(log10_props)) %>%
+  ungroup() %>%
+  
+  group_by(Taxa) %>% mutate(max=max(mean)) %>% ungroup() %>%
+  
+  group_by(Taxa, WOL) %>%
+    mutate(ngroups=n_distinct(study_group)) %>%
+  ungroup() %>%
+  
+  filter(ngroups>=2) %>% # Only test PMA_rounded where you have both study groups
+  
+  group_by(Taxa, WOL, max) %>%
+    do(tidy(lm(as.formula(myform), data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "", term)) %>%
+  
+  group_by(term, WOL) %>%
+    mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+props_toTest_g %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, WOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  # mutate(Taxa = reorder(Taxa, -log10_props)) %>%
+  # mutate(Taxa = fct_relabel(Taxa, function(x) gsub(" ", "\n", x))) %>%
+  group_by(WOL, Taxa, study_group, sample_type) %>%
+    summarise(mean=mean(log10_props), sd=sd(log10_props), n=n(), max=max(log10_props)) %>%
+  ungroup() %>%
+  mutate(se=sd/sqrt(n)) %>%
+  ggplot(aes(y=10^(mean), x=WOL)) +
+    # geom_vline(aes(xintercept = PMA_rounded), lwd=0.3, color="grey") + # guide lines
+    geom_line(aes(color=study_group, group = study_group)) +  
+    geom_point(aes(color=study_group)) +
+    geom_point(data = summaries_df %>% filter(fdr<0.1, term==levels(s2$growth_cat)[2]), mapping = aes(x=WOL, y=10^max +.2, color=term), shape=8) +
+    geom_point(data = summaries_df %>% filter(fdr>=0.1, p.value<0.05, term==levels(s2$growth_cat)[2]), mapping = aes(x=WOL, y=10^max +.2, color=term), shape=23) +
+
+    geom_point(data = summaries_df %>% filter(fdr<0.1, term==levels(s2$growth_cat)[3]), mapping = aes(color=term, x=WOL, y=10^max +.4), shape=8) +
+    geom_point(data = summaries_df %>% filter(p.value<0.05, fdr>=0.1, term==levels(s2$growth_cat)[3]), mapping = aes(color=term, x=WOL, y=10^max +.4), shape=23) +
+    scale_color_manual(values = ann_colors$growth_cat) +
+    scale_y_continuous(transform = "log10", labels = scales::percent) +
+    theme_bw() +
+  theme(legend.position = "bottom") +
+    theme(panel.grid = element_blank()) +
+    geom_errorbar(aes(ymin = 10^(mean-se), ymax=10^(mean+se), color=study_group), alpha=0.5, width = 0.3) +
+    facet_wrap(~Taxa, ncol=3, scales="free") +
+  labs(y="Concentration (umol/g log-scale)")
+
+# table_export(summaries_df, "Taxonomic_table_export")
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  pander(split.tab=Inf, emphasize.strong.rows = which(.$fdr<=0.05)) #%>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+
+rm(myform)
+```
+
+Growth Failure:  
+Asterisk/star for fdr-adjusted p-value<0.05. Diamond for p-unadjusted<0.05  
+```{r fig.height=9, fig.width=8}
+myform="log10_props ~ study_group"
+
+summaries_df <- props_toTest_g %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, WOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  group_by(WOL, Taxa, study_group, sample_type) %>%
+    mutate(mean=mean(log10_props)) %>%
+  ungroup() %>%
+  
+  group_by(Taxa) %>% mutate(max=max(mean)) %>% ungroup() %>%
+  
+  group_by(Taxa, WOL) %>%
+    mutate(ngroups=n_distinct(study_group)) %>%
+  ungroup() %>%
+  
+  filter(ngroups>=2) %>% # Only test PMA_rounded where you have both study groups
+  
+  group_by(Taxa, WOL, max) %>%
+    do(tidy(lm(as.formula(myform), data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "", term)) %>%
+  
+  group_by(term, WOL) %>%
+    mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+props_toTest_g %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, WOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  # mutate(Taxa = reorder(Taxa, -log10_props)) %>%
+  # mutate(Taxa = fct_relabel(Taxa, function(x) gsub(" ", "\n", x))) %>%
+  group_by(WOL, Taxa, study_group, sample_type) %>%
+    summarise(mean=mean(log10_props), sd=sd(log10_props), n=n(), max=max(log10_props)) %>%
+  ungroup() %>%
+  mutate(se=sd/sqrt(n)) %>%
+  ggplot(aes(y=10^(mean), x=WOL)) +
+    # geom_vline(aes(xintercept = PMA_rounded), lwd=0.3, color="grey") + # guide lines
+    geom_line(aes(color=study_group, group = study_group)) +  
+    geom_point(aes(color=study_group)) +
+    geom_point(data = summaries_df %>% filter(fdr<0.05), mapping = aes(x=WOL, y=10^max +.2, color=term), shape=8) +
+    geom_point(data = summaries_df %>% filter(fdr>0.05, p.value<0.05), mapping = aes(x=WOL, y=10^max +.2, color=term), shape=23) +
+    # geom_point(data = summaries_df %>% filter(p.value<0.05, term=="moderate to severe retardation"), mapping = aes(color=term, x=WOL, y=10^max +.4), shape=8) +
+    scale_color_manual(values = ann_colors$growth_failure) +
+    scale_y_continuous(transform = "log10", labels = scales::percent) +
+    theme_bw() +
+  theme(legend.position = "bottom") +
+    theme(panel.grid = element_blank()) +
+    geom_errorbar(aes(ymin = 10^(mean-se), ymax=10^(mean+se), color=study_group), alpha=0.5, width = 0.3) +
+    facet_wrap(~Taxa, ncol=3, scales="free") +
+  labs(y="Concentration (umol/g log-scale)")
+
+# table_export(summaries_df, "Taxonomic_table_export")
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  pander(split.tab=Inf, emphasize.strong.rows = which(.$fdr<=0.05)) #%>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+
+rm(myform)
+```
+
+
+
+## Monthly 
+### SPECIES
+Is there a week where the groups diverge?  
+Asterisk/star for fdr-adjusted p-value<0.05. Diamond for p-unadjusted<0.05  
+Linear models were used to estimate the differences between study groups at each week of life. The relative abundances were log10 transformed. Multiple tests were adjusted for false discovery rate using Benjamini-Hochberg method. Only the terms with p<0.1 are shown in the table below.
+
+Growth Faltering:  
+```{r fig.height=9, fig.width=8}
+myform="log10_props ~ study_group"
+
+summaries_df <- props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, MOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  group_by(MOL, Taxa, study_group, sample_type) %>%
+    mutate(mean=mean(log10_props)) %>%
+  ungroup() %>%
+  
+  group_by(Taxa) %>% mutate(max=max(mean)) %>% ungroup() %>%
+  
+  group_by(Taxa, MOL) %>%
+    mutate(ngroups=n_distinct(study_group)) %>%
+  ungroup() %>%
+  
+  filter(ngroups>=2) %>% # Only test PMA_rounded where you have both study groups
+  
+  group_by(Taxa, MOL, max) %>%
+    do(tidy(lm(as.formula(myform), data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "", term)) %>%
+  
+  group_by(term, MOL) %>%
+    mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, MOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  # mutate(Taxa = reorder(Taxa, -log10_props)) %>%
+  # mutate(Taxa = fct_relabel(Taxa, function(x) gsub(" ", "\n", x))) %>%
+  group_by(MOL, Taxa, study_group, sample_type) %>%
+    summarise(mean=mean(log10_props), sd=sd(log10_props), n=n(), max=max(log10_props)) %>%
+  ungroup() %>%
+  mutate(se=sd/sqrt(n)) %>%
+  ggplot(aes(y=10^(mean), x=MOL)) +
+    # geom_vline(aes(xintercept = PMA_rounded), lwd=0.3, color="grey") + # guide lines
+    geom_line(aes(color=study_group, group = study_group)) +  
+    geom_point(aes(color=study_group)) +
+    geom_point(data = summaries_df %>% filter(fdr<0.1, term==levels(s2$growth_cat)[2]), mapping = aes(x=MOL, y=10^max +.2, color=term), shape=8) +
+    geom_point(data = summaries_df %>% filter(fdr>=0.1, p.value<0.05, term==levels(s2$growth_cat)[2]), mapping = aes(x=MOL, y=10^max +.2, color=term), shape=23) +
+
+    geom_point(data = summaries_df %>% filter(fdr<0.1, term==levels(s2$growth_cat)[3]), mapping = aes(color=term, x=MOL, y=10^max +.4), shape=8) +
+    geom_point(data = summaries_df %>% filter(p.value<0.05, fdr>=0.1, term==levels(s2$growth_cat)[3]), mapping = aes(color=term, x=MOL, y=10^max +.4), shape=23) +
+    scale_color_manual(values = ann_colors$growth_cat) +
+    scale_y_continuous(transform = "log10", labels = scales::percent) +
+    theme_bw() +
+  theme(legend.position = "bottom") +
+    theme(panel.grid = element_blank()) +
+    geom_errorbar(aes(ymin = 10^(mean-se), ymax=10^(mean+se), color=study_group), alpha=0.5, width = 0.3) +
+    facet_wrap(~Taxa, ncol=3, scales="free") +
+  labs(y="Concentration (umol/g log-scale)")
+
+# table_export(summaries_df, "Taxonomic_table_export")
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  pander(split.tab=Inf, emphasize.strong.rows = which(.$fdr<=0.05)) #%>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+
+rm(myform)
+```
+
+Growth Failure:  
+Asterisk/star for fdr-adjusted p-value<0.05. Diamond for p-unadjusted<0.05  
+```{r fig.height=9, fig.width=8}
+myform="log10_props ~ study_group"
+
+summaries_df <- props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, MOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  group_by(MOL, Taxa, study_group, sample_type) %>%
+    mutate(mean=mean(log10_props)) %>%
+  ungroup() %>%
+  
+  group_by(Taxa) %>% mutate(max=max(mean)) %>% ungroup() %>%
+  
+  group_by(Taxa, MOL) %>%
+    mutate(ngroups=n_distinct(study_group)) %>%
+  ungroup() %>%
+  
+  filter(ngroups>=2) %>% # Only test PMA_rounded where you have both study groups
+  
+  group_by(Taxa, MOL, max) %>%
+    do(tidy(lm(as.formula(myform), data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "", term)) %>%
+  
+  group_by(term, MOL) %>%
+    mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, MOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  # mutate(Taxa = reorder(Taxa, -log10_props)) %>%
+  # mutate(Taxa = fct_relabel(Taxa, function(x) gsub(" ", "\n", x))) %>%
+  group_by(MOL, Taxa, study_group, sample_type) %>%
+    summarise(mean=mean(log10_props), sd=sd(log10_props), n=n(), max=max(log10_props)) %>%
+  ungroup() %>%
+  mutate(se=sd/sqrt(n)) %>%
+  ggplot(aes(y=10^(mean), x=MOL)) +
+    # geom_vline(aes(xintercept = PMA_rounded), lwd=0.3, color="grey") + # guide lines
+    geom_line(aes(color=study_group, group = study_group)) +  
+    geom_point(aes(color=study_group)) +
+    geom_point(data = summaries_df %>% filter(fdr<0.05), mapping = aes(x=MOL, y=10^max +.2, color=term), shape=8) +
+    geom_point(data = summaries_df %>% filter(fdr>0.05, p.value<0.05), mapping = aes(x=MOL, y=10^max +.2, color=term), shape=23) +
+    # geom_point(data = summaries_df %>% filter(p.value<0.05, term=="moderate to severe retardation"), mapping = aes(color=term, x=MOL, y=10^max +.4), shape=8) +
+    scale_color_manual(values = ann_colors$growth_failure) +
+    scale_y_continuous(transform = "log10", labels = scales::percent) +
+    theme_bw() +
+  theme(legend.position = "bottom") +
+    theme(panel.grid = element_blank()) +
+    geom_errorbar(aes(ymin = 10^(mean-se), ymax=10^(mean+se), color=study_group), alpha=0.5, width = 0.3) +
+    facet_wrap(~Taxa, ncol=3, scales="free") +
+  labs(y="Concentration (umol/g log-scale)")
+
+# table_export(summaries_df, "Taxonomic_table_export")
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  pander(split.tab=Inf, emphasize.strong.rows = which(.$fdr<=0.05)) #%>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+
+rm(myform)
+```
+
+
+### GENUS  
+Growth Faltering:  
+```{r fig.height=9, fig.width=8}
+myform="log10_props ~ study_group"
+
+summaries_df <- props_toTest_g %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, WOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  group_by(WOL, Taxa, study_group, sample_type) %>%
+    mutate(mean=mean(log10_props)) %>%
+  ungroup() %>%
+  
+  group_by(Taxa) %>% mutate(max=max(mean)) %>% ungroup() %>%
+  
+  group_by(Taxa, WOL) %>%
+    mutate(ngroups=n_distinct(study_group)) %>%
+  ungroup() %>%
+  
+  filter(ngroups>=2) %>% # Only test PMA_rounded where you have both study groups
+  
+  group_by(Taxa, WOL, max) %>%
+    do(tidy(lm(as.formula(myform), data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "", term)) %>%
+  
+  group_by(term, WOL) %>%
+    mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+props_toTest_g %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, WOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  # mutate(Taxa = reorder(Taxa, -log10_props)) %>%
+  # mutate(Taxa = fct_relabel(Taxa, function(x) gsub(" ", "\n", x))) %>%
+  group_by(WOL, Taxa, study_group, sample_type) %>%
+    summarise(mean=mean(log10_props), sd=sd(log10_props), n=n(), max=max(log10_props)) %>%
+  ungroup() %>%
+  mutate(se=sd/sqrt(n)) %>%
+  ggplot(aes(y=10^(mean), x=WOL)) +
+    # geom_vline(aes(xintercept = PMA_rounded), lwd=0.3, color="grey") + # guide lines
+    geom_line(aes(color=study_group, group = study_group)) +  
+    geom_point(aes(color=study_group)) +
+    geom_point(data = summaries_df %>% filter(fdr<0.1, term==levels(s2$growth_cat)[2]), mapping = aes(x=WOL, y=10^max +.2, color=term), shape=8) +
+    geom_point(data = summaries_df %>% filter(fdr>=0.1, p.value<0.05, term==levels(s2$growth_cat)[2]), mapping = aes(x=WOL, y=10^max +.2, color=term), shape=23) +
+
+    geom_point(data = summaries_df %>% filter(fdr<0.1, term==levels(s2$growth_cat)[3]), mapping = aes(color=term, x=WOL, y=10^max +.4), shape=8) +
+    geom_point(data = summaries_df %>% filter(p.value<0.05, fdr>=0.1, term==levels(s2$growth_cat)[3]), mapping = aes(color=term, x=WOL, y=10^max +.4), shape=23) +
+    scale_color_manual(values = ann_colors$growth_cat) +
+    scale_y_continuous(transform = "log10", labels = scales::percent) +
+    theme_bw() +
+  theme(legend.position = "bottom") +
+    theme(panel.grid = element_blank()) +
+    geom_errorbar(aes(ymin = 10^(mean-se), ymax=10^(mean+se), color=study_group), alpha=0.5, width = 0.3) +
+    facet_wrap(~Taxa, ncol=3, scales="free") +
+  labs(y="Concentration (umol/g log-scale)")
+
+# table_export(summaries_df, "Taxonomic_table_export")
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  pander(split.tab=Inf, emphasize.strong.rows = which(.$fdr<=0.05)) #%>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+
+rm(myform)
+```
+
+Growth Failure:  
+Asterisk/star for fdr-adjusted p-value<0.05. Diamond for p-unadjusted<0.05  
+```{r fig.height=9, fig.width=8}
+myform="log10_props ~ study_group"
+
+summaries_df <- props_toTest_g %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, WOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  group_by(WOL, Taxa, study_group, sample_type) %>%
+    mutate(mean=mean(log10_props)) %>%
+  ungroup() %>%
+  
+  group_by(Taxa) %>% mutate(max=max(mean)) %>% ungroup() %>%
+  
+  group_by(Taxa, WOL) %>%
+    mutate(ngroups=n_distinct(study_group)) %>%
+  ungroup() %>%
+  
+  filter(ngroups>=2) %>% # Only test PMA_rounded where you have both study groups
+  
+  group_by(Taxa, WOL, max) %>%
+    do(tidy(lm(as.formula(myform), data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "", term)) %>%
+  
+  group_by(term, WOL) %>%
+    mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+props_toTest_g %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, WOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  # mutate(Taxa = reorder(Taxa, -log10_props)) %>%
+  # mutate(Taxa = fct_relabel(Taxa, function(x) gsub(" ", "\n", x))) %>%
+  group_by(WOL, Taxa, study_group, sample_type) %>%
+    summarise(mean=mean(log10_props), sd=sd(log10_props), n=n(), max=max(log10_props)) %>%
+  ungroup() %>%
+  mutate(se=sd/sqrt(n)) %>%
+  ggplot(aes(y=10^(mean), x=WOL)) +
+    # geom_vline(aes(xintercept = PMA_rounded), lwd=0.3, color="grey") + # guide lines
+    geom_line(aes(color=study_group, group = study_group)) +  
+    geom_point(aes(color=study_group)) +
+    geom_point(data = summaries_df %>% filter(fdr<0.05), mapping = aes(x=WOL, y=10^max +.2, color=term), shape=8) +
+    geom_point(data = summaries_df %>% filter(fdr>0.05, p.value<0.05), mapping = aes(x=WOL, y=10^max +.2, color=term), shape=23) +
+    # geom_point(data = summaries_df %>% filter(p.value<0.05, term=="moderate to severe retardation"), mapping = aes(color=term, x=WOL, y=10^max +.4), shape=8) +
+    scale_color_manual(values = ann_colors$growth_failure) +
+    scale_y_continuous(transform = "log10", labels = scales::percent) +
+    theme_bw() +
+  theme(legend.position = "bottom") +
+    theme(panel.grid = element_blank()) +
+    geom_errorbar(aes(ymin = 10^(mean-se), ymax=10^(mean+se), color=study_group), alpha=0.5, width = 0.3) +
+    facet_wrap(~Taxa, ncol=3, scales="free") +
+  labs(y="Concentration (umol/g log-scale)")
+
+# table_export(summaries_df, "Taxonomic_table_export")
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  pander(split.tab=Inf, emphasize.strong.rows = which(.$fdr<=0.05)) #%>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+
+rm(myform)
+```
+
+
+
+
+## Continuous trajectories over age  
+### SPECIES
+```{r fig.height=9, fig.width=8}
+myform="log10_props ~ study_group * WOL"
+myform_covariates="log10_props ~ log_npo_days_prop + bwt_z + study_group * WOL"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "Taxa", props_toTest = props_toTest, s_toTest = s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, WOL, npo_days_prop, bwt_z) %>% mutate(log_npo_days_prop = log10(npo_days_prop + min(s2$npo_days_prop[s2$npo_days_prop>0])/2)), form1 = myform, rep_mes_label = "SubjectID", p_cutoff =  0.05) 
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear mixed effects models of log10 transformed relative abundance with subject id as random effect. Filtered with p.value < 0.05. Full formula: {form1}"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+# summaries_df %>% filter(grepl(":", term), p.value<0.05)
+props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, HOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  ggplot(aes(y=props, x=HOL)) +
+    geom_point(aes(color=study_group), alpha=0.1) +
+    geom_smooth(aes(color=study_group, group = study_group), se = F) +  
+    scale_color_manual(values = ann_colors$growth_cat) +
+    scale_y_continuous(transform = "log10", labels = scales::percent) +
+    theme_bw() +
+  theme(legend.position = "bottom", panel.grid = element_blank()) +
+    facet_wrap(~Taxa, ncol=3, scales="free") +
+  labs(y="Concentration (umol/g log-scale)")
+```
+
+
+```{r fig.height=3, fig.width=6}
+sigtaxa <- summaries_df %>% filter(grepl(":", term), fdr<0.1) %>% pull(Taxa)
+tmp=summaries_df %>% filter(grepl(":", term), fdr<0.1) %>% mutate(siggroup = gsub("study_group|:WOL", "", term)) %>% mutate(`Growth Faltering` = factor(x = siggroup, levels = c("none", "mild retardation", "moderate to severe retardation"), labels = c("none", "mild faltering", "moderate to severe faltering"))) %>% mutate(ypos=if_else(Taxa == "Firmicutes Clostridium perfringens", 1e-5, 1e-5))
+
+props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, HOL), by = "SampleID") %>%
+  filter(!is.na(study_group), Taxa %in% sigtaxa) %>%
+  # ggplot(aes(y=props, x=HOL)) +
+  #   geom_point(aes(color=study_group), alpha=0.1) +
+  #   geom_smooth(aes(color=study_group, group = study_group), se = F) +  
+    mutate(`Growth Faltering` = factor(x = study_group, labels = c("none", "mild faltering", "moderate to severe faltering"))) %>%
+  filter(!is.na(study_group)) %>%
+  ggplot(aes(y=props, x=HOL)) +
+    geom_point(aes(color=`Growth Faltering`), alpha=0.1) +
+    geom_smooth(aes(color=`Growth Faltering`, group = `Growth Faltering`), se = F) +  
+    geom_label(data = tmp, aes(x=2200, y=ypos, color=`Growth Faltering`, label = paste("q=", signif(fdr, 2))), fill=NA, show.legend = FALSE) + 
+    scale_color_manual(values = as.character(ann_colors$growth_cat)) +
+    scale_y_continuous(transform = "log10", labels = scales::percent) +
+    theme_bw() +
+  theme(legend.position = "bottom", panel.grid = element_blank(), text = element_text(size=10, color="black"), axis.text = element_text(size=8, color="black"), strip.text = element_text(size=10, color="black", face="italic"), legend.text = element_text(size=10, color="black")) +    
+  facet_wrap(~gsub("Firmicutes |Proteobacteria ", "", Taxa), ncol=3, scales="free") +
+  labs(y="Relative Abundance", x="Hours of Life")
+
+ggsave(here("Output", "SUPPFIG4B_speciesRA_GrFaltering.pdf"), width=6, height = 3, useDingbats = F, dpi = 600)
+```
+
+WITH COVARIATES: `r myform_covariates`   
+```{r}
+myform_covariates="log10_props ~ log_npo_days_prop + bwt_z + study_group * WOL"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "Taxa", props_toTest = props_toTest, s_toTest = s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, WOL, npo_days_prop, bwt_z) %>% mutate(log_npo_days_prop = log10(npo_days_prop + min(s2$npo_days_prop[s2$npo_days_prop>0])/2)), form1 = myform_covariates, rep_mes_label = "SubjectID", p_cutoff =  0.05)
+
+summaries_df %>%
+  filter(fdr < 0.1, grepl(":", term)) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear mixed effects models of log10 transformed relative abundance with subject id as random effect. Filtered with fdr < 0.1 and only interaction terms. Full formula: {myform_covariates}"), emphasize.strong.rows = which(.$fdr<=0.05))
+```
+
+
+```{r fig.height=9, fig.width=8}
+# GROWTH FAILURE
+summaries_df <- run_lmer_on_props(factor_to_test = "Taxa", props_toTest = props_toTest, s_toTest = s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, WOL), form1 = myform, rep_mes_label = "SubjectID", p_cutoff =  0.05) 
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear mixed effects models of log10 transformed relative abundance with subject id as random effect. Filtered with p.value < 0.05. Full formula: {form1}"), emphasize.strong.rows = which(.$fdr<=0.05))
+rm(myform)
+
+props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, HOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  ggplot(aes(y=props, x=HOL)) +
+    geom_point(aes(color=study_group), alpha=0.1) +
+    geom_smooth(aes(color=study_group, group = study_group), se = F) +  
+    scale_color_manual(values = ann_colors$growth_failure) +
+    scale_y_continuous(transform = "log10", labels = scales::percent) +
+    theme_bw() +
+  theme(legend.position = "bottom", panel.grid = element_blank()) +
+    facet_wrap(~Taxa, ncol=3, scales="free") +
+  labs(y="Concentration (umol/g log-scale)")
+
+```
+
+```{r fig.width=8, fig.height=5}
+sigtaxa <- summaries_df %>% filter(grepl(":", term), fdr<0.1) %>% pull(Taxa)
+tmp=summaries_df %>% filter(grepl(":", term), fdr<0.1) %>% mutate(siggroup = gsub("study_group|:WOL", "", term)) %>% mutate(ypos=if_else(Taxa=="Proteobacteria Enterobacteriaceae", 1e-5, if_else(Taxa=="Firmicutes Staphylococcus epidermidis", 0.2, 1e-6)))
+
+props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, HOL), by = "SampleID") %>%
+  filter(!is.na(study_group), Taxa %in% sigtaxa) %>%
+  ggplot(aes(y=props, x=HOL)) +
+    geom_point(aes(color=study_group), alpha=0.1) +
+    geom_smooth(aes(color=study_group, group = study_group), se = F) +  
+    geom_label(data = tmp, aes(x=2100, y=ypos, color=siggroup, label = paste("q=", signif(fdr, 2))), fill=NA, show.legend = F) + 
+    scale_color_manual(values = ann_colors$growth_failure) +
+    scale_y_continuous(transform = "log10", labels = scales::percent) +
+    theme_bw() +
+  theme(legend.position = "bottom", panel.grid = element_blank()) +
+    facet_wrap(~gsub("Firmicutes |Proteobacteria ", "", Taxa), ncol=3, scales="free") +
+    theme(legend.position = "bottom", panel.grid = element_blank(), text = element_text(size=10, color="black"), axis.text = element_text(size=8, color="black"), strip.text = element_text(size=10, color="black", face="italic"), legend.text = element_text(size=10, color="black")) +    
+  labs(y="Relative Abundance", color="Growth Failure")
+
+ggsave(here("Output", "SUPPFIG2B_speciesRA_GrFailure.pdf"), width=6, height = 3, useDingbats = F, dpi = 600)
+```
+
+WITH COVARIATES: `r myform_covariates`   
+```{r}
+myform_covariates="log10_props ~ study_group * WOL + log_npo_days_prop + bwt_z"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "Taxa", props_toTest = props_toTest, s_toTest = s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, WOL, npo_days_n, npo_days_prop, bwt_z) %>% mutate(log_npo_days_prop = log10(npo_days_prop + min(s2$npo_days_prop[s2$npo_days_prop>0])/2)), form1 = myform_covariates, rep_mes_label = "SubjectID", p_cutoff =  0.05) 
+
+summaries_df %>%
+  filter(fdr < 0.1, grepl(":", term)) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear mixed effects models of log10 transformed relative abundance with subject id as random effect. Filtered with fdr < 0.1 and only interaction terms. Full formula: {myform_covariates}"), emphasize.strong.rows = which(.$fdr<=0.05))
+```
+
+### GENUS  
+#### NEW Supp Fig 2 (12/18/25)   
+```{r fig.height=3, fig.width=8}
+myform="log10_props ~ study_group * WOL"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "Taxa", props_toTest = props_toTest_g, s_toTest = s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, WOL), form1 = myform, rep_mes_label = "SubjectID", p_cutoff =  0.05) 
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear mixed effects models of log10 transformed relative abundance with subject id as random effect. Filtered with p.value < 0.05. Full formula: {form1}"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+sigtaxa <- summaries_df %>% filter(grepl(":", term), fdr<0.1) %>% pull(Taxa)
+tmp=summaries_df %>% filter(grepl(":", term), fdr<0.1) %>% mutate(siggroup = gsub("study_group|:WOL", "", term)) %>% mutate(`Growth Faltering` = factor(x = siggroup, levels = c("none", "mild retardation", "moderate to severe retardation"), labels = c("none", "mild faltering", "moderate to severe faltering"))) %>% mutate(ypos=if_else(Taxa == "Proteobacteria Escherichia", 1e-5, 1e-6))
+
+props_toTest_g %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, HOL), by = "SampleID") %>%
+  filter(!is.na(study_group), Taxa %in% sigtaxa) %>%
+  # ggplot(aes(y=props, x=HOL)) +
+  #   geom_point(aes(color=study_group), alpha=0.1) +
+  #   geom_smooth(aes(color=study_group, group = study_group), se = F) +  
+    mutate(`Growth Faltering` = factor(x = study_group, labels = c("none", "mild faltering", "moderate to severe faltering"))) %>%
+  filter(!is.na(study_group)) %>%
+  ggplot(aes(y=props, x=HOL)) +
+    geom_point(aes(color=`Growth Faltering`), alpha=0.1) +
+    geom_smooth(aes(color=`Growth Faltering`, group = `Growth Faltering`), se = F) +  
+    geom_label(data = tmp, aes(x=1900, y=ypos, color=`Growth Faltering`, label = paste("q=", signif(fdr, 2))), fill=NA, show.legend = FALSE) + 
+    scale_color_manual(values = as.character(ann_colors$growth_cat)) +
+    scale_y_continuous(transform = "log10", labels = scales::percent) +
+    theme_bw() +
+  theme(legend.position = "bottom", panel.grid = element_blank(), text = element_text(size=10, color="black"), axis.text = element_text(size=8, color="black"), strip.text = element_text(size=10, color="black", face="italic"), legend.text = element_text(size=10, color="black")) +    
+  facet_wrap(~gsub("Firmicutes |Proteobacteria ", "", Taxa), ncol=3, scales="free") +
+  labs(y="Relative Abundance", x="Hours of Life")
+
+ggsave(here("Output", "SUPPFIG2A_genusRA_GrFaltering.pdf"), width=8, height = 3, useDingbats = F, dpi = 600)
+```
+
+WITH COVARIATES: `r myform_covariates`   
+```{r}
+myform_covariates="log10_props ~ log_npo_days_prop + bwt_z + study_group * WOL"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "Taxa", props_toTest = props_toTest_g, s_toTest = s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, WOL, npo_days_prop, bwt_z) %>% mutate(log_npo_days_prop = log10(npo_days_prop + min(s2$npo_days_prop[s2$npo_days_prop>0])/2)), form1 = myform_covariates, rep_mes_label = "SubjectID", p_cutoff =  0.05)
+
+summaries_df %>%
+  filter(fdr < 0.1, grepl(":", term)) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear mixed effects models of log10 transformed relative abundance with subject id as random effect. Filtered with fdr < 0.1 and only interaction terms. Full formula: {myform_covariates}"), emphasize.strong.rows = which(.$fdr<=0.05))
+```
+
+
+```{r fig.height=3, fig.width=6}
+# GROWTH FAILURE
+summaries_df <- run_lmer_on_props(factor_to_test = "Taxa", props_toTest = props_toTest_g, s_toTest = s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, WOL), form1 = myform, rep_mes_label = "SubjectID", p_cutoff =  0.05) 
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear mixed effects models of log10 transformed relative abundance with subject id as random effect. Filtered with p.value < 0.05. Full formula: {form1}"), emphasize.strong.rows = which(.$fdr<=0.05))
+rm(myform)
+
+sigtaxa <- summaries_df %>% filter(grepl(":", term), fdr<0.1) %>% pull(Taxa)
+tmp=summaries_df %>% filter(grepl(":", term), fdr<0.1) %>% mutate(siggroup = gsub("study_group|:WOL", "", term)) %>% mutate(ypos=if_else(Taxa=="Firmicutes Staphylococcus", 0.5, 1e-6))
+
+props_toTest_g %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, HOL), by = "SampleID") %>%
+  filter(!is.na(study_group), Taxa %in% sigtaxa) %>%
+  ggplot(aes(y=props, x=HOL)) +
+    geom_point(aes(color=study_group), alpha=0.1) +
+    geom_smooth(aes(color=study_group, group = study_group), se = F) +  
+    geom_label(data = tmp, aes(x=2100, y=ypos, color=siggroup, label = paste("q=", signif(fdr, 2))), fill=NA, show.legend = F) + 
+    scale_color_manual(values = ann_colors$growth_failure) +
+    scale_y_continuous(transform = "log10", labels = scales::percent) +
+    theme_bw() +
+  theme(legend.position = "bottom", panel.grid = element_blank()) +
+    facet_wrap(~gsub("Firmicutes |Proteobacteria ", "", Taxa), ncol=3, scales="free") +
+    theme(legend.position = "bottom", panel.grid = element_blank(), text = element_text(size=10, color="black"), axis.text = element_text(size=8, color="black"), strip.text = element_text(size=10, color="black", face="italic"), legend.text = element_text(size=10, color="black")) +    
+  labs(y="Relative Abundance", color="Growth Failure")
+
+ggsave(here("Output", "SUPPFIG2A_genusRA_GrFailure.pdf"), width=6, height = 3, useDingbats = F, dpi = 600)
+```
+
+WITH COVARIATES: `r myform_covariates`   
+```{r}
+myform_covariates="log10_props ~ log_npo_days_prop + bwt_z + study_group * WOL"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "Taxa", props_toTest = props_toTest_g, s_toTest = s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, WOL, npo_days_prop, bwt_z) %>% mutate(log_npo_days_prop = log10(npo_days_prop + min(s2$npo_days_prop[s2$npo_days_prop>0])/2)), form1 = myform_covariates, rep_mes_label = "SubjectID", p_cutoff = 0.05)
+
+summaries_df %>%
+  filter(fdr < 0.1, grepl(":", term)) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear mixed effects models of log10 transformed relative abundance with subject id as random effect. Filtered with fdr < 0.1 and only interaction terms. Full formula: {myform_covariates}"), emphasize.strong.rows = which(.$fdr<=0.05))
+```
+
+# OXYGEN USAGE  
+```{r}
+library(whatbacteria)
+dbedit <- bind_rows(c(taxon="Klebsiella aerogenes", rank="Species", aerobic_status="facultative anaerobe", gram_stain="Gram-negative", doi="Google"), 
+          c(taxon="Citrobacter freundii", rank="Species", aerobic_status="facultative anaerobe", gram_stain="Gram-negative", doi="Google"),
+          c(taxon="Enterobacterales", rank="Order", aerobic_status="facultative anaerobe", gram_stain="Gram-negative", doi="Google"),
+          c(taxon="Klebsiella pneumoniae", rank="Species", aerobic_status="facultative anaerobe", gram_stain="Gram-negative", doi="Google"),
+          c(taxon="Proteus mirabilis", rank="Species", aerobic_status="facultative anaerobe", gram_stain="Gram-negative", doi="Google"),
+          c(taxon="Klebsiella oxytoca", rank="Species", aerobic_status="facultative anaerobe", gram_stain="Gram-negative", doi="Google"),
+          c(taxon="Klebsiella", rank="Genus", aerobic_status="facultative anaerobe", gram_stain="Gram-negative", doi="Google"),
+           whatbacteria::taxon_phenotypes)
+# bind_cols(unique(props_toTest$Taxa), what_phenotype(db = dbedit, lineage = unique(props_toTest$Taxa), phenotype ="aerobic_status")) # %>%
+
+props_toTest <- props_toTest %>%
+  mutate(aerobic_status = what_phenotype(db = dbedit, lineage = Taxa, phenotype = "aerobic_status"),
+         gram_stain = what_phenotype(db = dbedit, lineage = Taxa, phenotype = "gram_stain"))
+```
+
+```{r fig.width=6.5}
+props_toTest %>%
+  group_by(SampleID, aerobic_status) %>%
+    summarise(sumprops = sum(props), sumpropslog=sum(log10_props)) %>%
+  ungroup() %>%
+  inner_join(s2) %>%
+  ggplot(aes(y=sumprops, x=growth_failure)) +
+    geom_boxplot(aes(group = interaction(growth_failure,aerobic_status), color=aerobic_status)) +
+  # ggpubr::stat_compare_means(mapping = aes(group = growth_failure)) + 
+  theme_bw() 
+
+props_toTest %>%
+  group_by(SampleID, aerobic_status) %>%
+    summarise(sumprops = sum(props), sumpropslog=sum(log10_props)) %>%
+  ungroup() %>%
+  inner_join(s2) %>%
+  ggplot(aes(y=sumprops, x=WOL)) +
+    geom_boxplot(aes(group = interaction(growth_failure,aerobic_status,WOL), fill=growth_failure, color=aerobic_status), outlier.shape=NA) +
+  scale_fill_manual(values = c("white", "lightgrey")) +
+  # ggpubr::stat_compare_means(mapping = aes(group = growth_failure)) + 
+  theme_bw() 
+
+# RATIO
+props_aerobic_ratio <- props_toTest %>%
+  group_by(SampleID, aerobic_status) %>%
+    summarise(sumprops = sum(props)) %>%
+  ungroup() %>%
+  mutate(sumpropslog = log10(sumprops)) %>%
+  group_by(SampleID) %>%
+    arrange(aerobic_status) %>%
+    summarise(propsratio=last(sumprops)/first(sumprops), logratio=last(sumpropslog)-first(sumpropslog), numerator=last(aerobic_status), denominator=first(aerobic_status)) %>%
+  inner_join(s2) 
+
+props_aerobic_ratio %>%
+  ggplot(aes(y=propsratio, x=growth_failure)) +
+  geom_boxplot(aes(group = growth_failure)) +
+  ggpubr::stat_compare_means(mapping = aes(group = growth_failure)) + 
+  scale_y_log10() +
+  theme_bw() +
+  labs(y="Obligate : Facultative Anaerobes ratio")
+
+# props_aerobic_ratio %>%
+#   ggplot(aes(y=propsratio, x=WOL)) +
+#   geom_boxplot(aes(group = interaction(WOL, growth_failure), fill=growth_failure), outlier.shape=21) +
+  # ggpubr::stat_compare_means(mapping = aes(group = growth_failure), hide.ns = F, label = "p.signif", method = "wilcox.test") + 
+  # scale_y_log10() +
+  # scale_fill_manual(values = ann_colors$growth_failure) +
+  # theme_bw() 
+```
+
+```{r fig.width=6.5}
+props_toTest %>%
+  group_by(SampleID, aerobic_status) %>%
+    summarise(sumprops = sum(props), sumpropslog=sum(log10_props)) %>%
+  ungroup() %>%
+  inner_join(s2) %>%
+  ggplot(aes(y=sumprops, x=growth_cat)) +
+    geom_boxplot(aes(group = interaction(growth_cat,aerobic_status), color=aerobic_status)) +
+  # ggpubr::stat_compare_means(mapping = aes(group = growth_cat)) + 
+  theme_bw() 
+
+props_toTest %>%
+  group_by(SampleID, aerobic_status) %>%
+    summarise(sumprops = sum(props), sumpropslog=sum(log10_props)) %>%
+  ungroup() %>%
+  inner_join(s2) %>%
+  ggplot(aes(y=sumprops, x=WOL)) +
+    geom_boxplot(aes(group = interaction(growth_cat,aerobic_status,WOL), fill=growth_cat, color=aerobic_status), outlier.shape=NA) +
+  scale_fill_manual(values = c("white", "lightgrey", "darkgrey")) +
+  # ggpubr::stat_compare_means(mapping = aes(group = growth_cat)) + 
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+props_toTest %>%
+  inner_join(s2 %>% select(SampleID, WOL, growth_failure, growth_cat)) %>%
+  group_by(aerobic_status, Taxa, WOL, growth_failure) %>%
+    summarise(meanprop = mean(props), sumpropslog=sum(log10_props), n=n()) %>%
+  ungroup() %>%
+  # mutate(meanprop=sumprops/n) %>%
+  ggplot(aes(y=meanprop, x=WOL)) +
+    geom_col(aes(fill=Taxa)) +
+  # facet_wrap(~paste(growth_failure, "Failure")+aerobic_status, ncol=2) +
+  facet_grid(paste(growth_failure, "Failure")~aerobic_status) +
+  scale_fill_viridis_d(option = "turbo") +
+  theme_bw() +
+  theme(legend.position = "right", legend.key.height = unit(0.5, units = "cm"))
+
+props_toTest %>%
+  inner_join(s2 %>% select(SampleID, WOL, growth_failure, growth_cat)) %>%
+  group_by(aerobic_status, Taxa, WOL, growth_cat) %>%
+    summarise(meanprop = mean(props), sumpropslog=sum(log10_props), n=n()) %>%
+  ungroup() %>%
+  # mutate(meanprop=sumprops/n) %>%
+  ggplot(aes(y=meanprop, x=WOL)) +
+    geom_col(aes(fill=Taxa)) +
+  facet_grid(growth_cat~aerobic_status) +
+  scale_fill_viridis_d(option = "turbo") +
+  theme_bw() +
+  theme(legend.position = "right", legend.key.height = unit(0.5, units = "cm"))
+
+# RATIO
+props_aerobic_ratio <- props_toTest %>%
+  group_by(SampleID, aerobic_status) %>%
+    summarise(sumprops = sum(props+1e-6)) %>%
+  ungroup() %>%
+  mutate(sumpropslog = log10(sumprops)) %>%
+  group_by(SampleID) %>%
+    arrange(aerobic_status) %>%
+    summarise(propsratio=last(sumprops)/first(sumprops), logratio=last(sumpropslog)-first(sumpropslog), numerator=last(aerobic_status), denominator=first(aerobic_status)) %>%
+  inner_join(s2) 
+
+props_aerobic_ratio %>%
+  ggplot(aes(y=propsratio, x=growth_cat)) +
+  geom_boxplot(aes(group = growth_cat)) +
+  ggpubr::stat_compare_means(mapping = aes(group = growth_cat)) + 
+  scale_y_log10() +
+  theme_bw() +
+  labs(y="Obligate : Facultative Anaerobes ratio")
+
+summaries_df <- props_aerobic_ratio %>% 
+  filter(WOL<=14, !is.na(growth_cat), !is.na(logratio)) %>%
+  group_by(WOL) %>%
+    # tidy(lm(data = ., formula=logratio ~ growth_cat)
+    do(tidy(lm(logratio ~ growth_cat, data=.))) %>%
+  ungroup()  %>%
+  filter(!grepl("Intercept|Residual", term)) %>%
+  mutate(term=gsub("growth_cat", "", term))
+
+props_aerobic_ratio %>%
+  ggplot(aes(y=propsratio, x=WOL)) +
+  geom_boxplot(aes(group = interaction(WOL, growth_cat), fill=growth_cat), outlier.shape=21) +
+  # ggpubr::stat_compare_means(mapping = aes(group = growth_cat), hide.ns = F, label = "p.signif", show.legend = T, method = "wilcox.test", position = position_jitter(height =1)) + 
+  geom_point(data=summaries_df %>% filter(term=="mild retardation", p.value<0.1), shape=8, mapping = aes(color=term, x=WOL, y=70)) +
+  geom_point(data=summaries_df %>% filter(term=="moderate to severe retardation", p.value<0.1), shape=8, mapping = aes(color=term, x=WOL, y=100)) +
+  scale_y_log10() +
+  scale_fill_manual(values = ann_colors$growth_cat) +
+  scale_color_manual(values = ann_colors$growth_cat, guide='none') +
+  theme_bw() +
+  theme(legend.position = "bottom")+
+  labs(y="Obligate : Facultative Anaerobes ratio")
+
+summaries_df %>% filter(p.value<0.1) %>% pander(split.tab=Inf)
+
+
+summaries_df <- props_aerobic_ratio %>% 
+  filter(WOL<=12, !is.na(growth_failure), !is.na(logratio)) %>%
+  group_by(WOL) %>%
+    # tidy(lm(data = ., formula=logratio ~ growth_cat)
+    do(tidy(lm(logratio ~ growth_failure, data=.))) %>%
+  ungroup()  %>%
+  filter(!grepl("Intercept|Residual", term)) %>%
+  mutate(term=gsub("growth_failure", "", term))
+
+props_aerobic_ratio %>%
+  ggplot(aes(y=propsratio, x=WOL)) +
+  geom_boxplot(aes(group = interaction(WOL, growth_failure), fill=growth_failure), outlier.shape=21) +
+  # ggpubr::stat_compare_means(mapping = aes(group = growth_cat), hide.ns = F, label = "p.signif", show.legend = T, method = "wilcox.test", position = position_jitter(height =1)) + 
+  geom_point(data=summaries_df %>% filter(p.value<0.1), shape=8, mapping = aes(color=term, x=WOL, y=70)) +
+  # geom_point(data=summaries_df %>% filter(term=="moderate to severe retardation", p.value<0.1), shape=8, mapping = aes(color=term, x=WOL, y=100)) +
+  scale_y_log10() +
+  scale_fill_manual(values = ann_colors$growth_failure) +
+  scale_color_manual(values = ann_colors$growth_failure, guide='none') +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(y="Obligate : Facultative Anaerobes ratio")
+
+summaries_df %>% filter(p.value<0.1) %>% pander(split.tab=Inf)
+```
+
+```{r fig.width=6.5}
+summaries_df <- props_aerobic_ratio %>% 
+  filter(WOL<=14, !is.na(growth_cat), !is.na(logratio)) %>%
+  group_by(MOL) %>%
+    # tidy(lm(data = ., formula=logratio ~ growth_cat)
+    do(tidy(lm(logratio ~ growth_cat, data=.))) %>%
+  ungroup()  %>%
+  filter(!grepl("Intercept|Residual", term)) %>%
+  mutate(term=gsub("growth_cat", "", term))
+
+props_aerobic_ratio %>%
+  ggplot(aes(y=propsratio, x=MOL)) +
+  geom_boxplot(aes(group = interaction(MOL, growth_cat), fill=growth_cat), outlier.shape=21) +
+  # ggpubr::stat_compare_means(mapping = aes(group = growth_cat), hide.ns = F, label = "p.signif", show.legend = T, method = "wilcox.test", position = position_jitter(height =1)) + 
+  geom_point(data=summaries_df %>% filter(term=="mild retardation", p.value<0.1), shape=8, mapping = aes(color=term, x=MOL, y=70)) +
+  geom_point(data=summaries_df %>% filter(term=="moderate to severe retardation", p.value<0.1), shape=8, mapping = aes(color=term, x=MOL, y=100)) +
+  scale_y_log10() +
+  scale_fill_manual(values = ann_colors$growth_cat) +
+  scale_color_manual(values = ann_colors$growth_cat, guide='none') +
+  theme_bw() +
+  theme(legend.position = "bottom")+
+  labs(y="Obligate : Facultative Anaerobes ratio")
+
+summaries_df %>% filter(p.value<0.1) %>% pander(split.tab=Inf)
+
+
+summaries_df <- props_aerobic_ratio %>% 
+  filter(WOL<=12, !is.na(growth_failure), !is.na(logratio)) %>%
+  group_by(MOL) %>%
+    # tidy(lm(data = ., formula=logratio ~ growth_cat)
+    do(tidy(lm(logratio ~ growth_failure, data=.))) %>%
+  ungroup()  %>%
+  filter(!grepl("Intercept|Residual", term)) %>%
+  mutate(term=gsub("growth_failure", "", term))
+
+props_aerobic_ratio %>%
+  ggplot(aes(y=propsratio, x=MOL)) +
+  geom_boxplot(aes(group = interaction(MOL, growth_failure), fill=growth_failure), outlier.shape=21) +
+  # ggpubr::stat_compare_means(mapping = aes(group = growth_cat), hide.ns = F, label = "p.signif", show.legend = T, method = "wilcox.test", position = position_jitter(height =1)) + 
+  geom_point(data=summaries_df %>% filter(p.value<0.1), shape=8, mapping = aes(color=term, x=MOL, y=70)) +
+  # geom_point(data=summaries_df %>% filter(term=="moderate to severe retardation", p.value<0.1), shape=8, mapping = aes(color=term, x=WOL, y=100)) +
+  scale_y_log10() +
+  scale_fill_manual(values = ann_colors$growth_failure) +
+  scale_color_manual(values = ann_colors$growth_failure, guide='none') +
+  theme_bw() +
+  theme(legend.position = "bottom") +
+  labs(y="Obligate : Facultative Anaerobes ratio")
+
+summaries_df %>% filter(p.value<0.1) %>% pander(split.tab=Inf)
+```
+
+
+\newpage
+# ~ METABOLITES ~
+# AGE  
+
+# FIG 2D
+Trajectory of metabolites over age (pretty summary)  
+FIGURE 2 optional summary of metabolites over age  
+```{r fig2eSUMMARY, fig.height = 2, fig.width =4, dpi=300}
+study_group_var = "WOL"
+# unique(stool_metab_toPlot$metab)
+aa <- c("Tyrosine", "Alanine", "Glycine", "Isovalerate", "Phenylalanine", "Threonine", "Histidine", "Lysine", "Tryptophan", "Methionine", "Glutamine", "Glutamate", "Aspartate", "Pyroglutamate")
+bcaa <- c("Isoleucine", "Leucine", "Valine")
+krebs <- c("Citrate", "Succinate", "Pyruvate", "Fumarate", "Formate")
+scfa <- c("Propionate", "Butyrate", "Acetate")
+purines <- c("Purine", "Hypoxanthine")
+sugar <- c("Galactose", "Glucose")
+#Creatine
+#Uracil
+#Glycerol
+voc <- c("Cadaverine", "Putrescine", "Dimethylamine")
+
+# stool_metab_toPlot <- stool_metab_long %>%
+#   inner_join(s2 %>% select(SampleID, growth_cat, growth_failure, TimePoint, SubjectID), by = "SampleID") %>% 
+#   droplevels() %>%
+#   mutate(metab_group = ifelse(metab %in% aa, "Amino acid", ifelse(metab %in% krebs, "Kreb's Cycle", ifelse(metab %in% scfa, "SCFA", ifelse(metab %in% purines, "Purines", ifelse(metab %in% sugar, "Sugars", ifelse(metab %in% voc, "VOC", metab)))))))
+
+x=data.frame(t(stool_metab %>% select(!c(SampleID, redcap_id, nmr_no, `Stool weight`, Seq_run5_YN, Sequenced, in_36wklist, HOL, DOL,Inf_metBol_mlk))))
+colnames(x) <- stool_metab$SampleID
+
+# y <- x %>% rownames_to_column("metab") %>% mutate(metab_group = ifelse(metab %in% aa, "Amino acids", ifelse(metab %in% krebs, "Kreb's Cycle", ifelse(metab %in% scfa, "SCFAs", ifelse(metab %in% purines, "Purines", ifelse(metab %in% sugar, "Sugars", ifelse(metab %in% voc, "VOCs", metab)))))))
+
+# Add number in each group:
+y <- x %>% rownames_to_column("metab") %>% mutate(metab_group = ifelse(metab %in% bcaa, paste0("BCAAs (", length(bcaa), ")"), ifelse(metab %in% aa, paste0("Amino acids (", length(aa), ")"), ifelse(metab %in% krebs, paste0("Kreb's Cycle (", length(krebs), ")"), ifelse(metab %in% scfa, paste0("SCFAs (", length(scfa), ")"), ifelse(metab %in% purines, paste0("Purines (", length(purines), ")"), ifelse(metab %in% sugar, paste0("Sugars (", length(sugar), ")"), ifelse(metab %in% voc, paste0("VOCs (", length(voc), ")"), metab))))))))
+
+metab_summarised <- rowsum(x, y$metab_group)
+metab_summarised %>%
+  rownames_to_column("metab") %>%
+  pivot_longer(!metab, names_to = "SampleID", values_to = "umol_g") %>%
+  inner_join(s2 %>% select(SampleID, growth_cat, growth_failure, TimePoint, SubjectID, WOL), by = "SampleID") %>%
+  filter(metab != "Glycerol") %>%
+  mutate(metab = reorder(metab, -umol_g)) %>%
+  ggplot(aes(x=get(study_group_var), y=umol_g)) +
+    geom_smooth(aes(group=metab, color=metab), alpha=0.2, size=0.5) + #, linetype = Taxa
+    scale_color_d3(palette = "category20") +
+    scale_x_continuous(expand=c(0,0)) +
+    scale_y_continuous(limit=c(0,NA), oob=squish, expand = c(0.01,0)) +
+    coord_cartesian(clip = "off") +
+    theme_bw() +
+    theme(
+      legend.key.size = unit(c(0.13), units = "in"),
+      legend.background = element_rect(fill = NA), 
+      legend.text = element_text(size=8),
+      legend.title=element_blank(),
+      panel.grid = element_blank(),
+      axis.ticks = element_line(linewidth = 0.3),
+      panel.border = element_rect(linewidth = 0.3),
+      axis.text = element_text(colour = "black", size=8)
+      ) +
+    guides(color=guide_legend(ncol=1, override.aes = list(lwd = 1, fill=NA))) +
+    labs(x=study_group_var, fill="", y="umol/g")
+  
+ggsave(here("Output", "FIG2D_stoolmetabolites_WOL_smooth.pdf"), width = 4, height = 2, useDingbats = F, dpi = 400)
+```
+
+```{r fig.width=4}
+s2 %>%
+  ggplot(aes(y=AbxHoursPerHOL, x=WOL)) + 
+  geom_smooth(aes(color=growth_failure))+
+  theme_bw()
+
+s2 %>%
+  ggplot(aes(y=AbxHoursPerHOL, x=WOL)) + 
+  geom_point(aes(color=SubjectID)) +
+  geom_boxplot(aes(group=WOL), outlier.shape=NA, fill=NA) +
+  facet_wrap(~growth_failure) +
+  scale_color_discrete(guide='none') +
+  theme_bw()
+
+s2 %>%
+  ggplot(aes(y=AbxHoursPerHOL, x=WOL)) + 
+  geom_smooth(aes(color=growth_cat))+
+  theme_bw()
+
+s2 %>%
+  ggplot(aes(y=AbxHoursPerHOL, x=WOL)) + 
+  geom_point(aes(color=SubjectID)) +
+  geom_boxplot(aes(group=WOL), outlier.shape=NA, fill=NA) +
+  facet_wrap(~growth_cat) +
+  scale_color_discrete(guide='none') +
+  theme_bw()
+
+pander(stool_metab_long %>% inner_join(s2 %>% select(SampleID, WOL,growth_cat, growth_failure)) %>% select(SampleID, WOL, growth_cat, growth_failure, metab, umol_g) %>% count(WOL, growth_failure, metab) %>% group_by(WOL, growth_failure) %>% summarise(`Average Sample Size`=mean(n)) %>% ungroup(), caption = "Sample sizes in growth failure groups (averaged over all metabolites)")
+
+pander(stool_metab_long %>% inner_join(s2 %>% select(SampleID, WOL,growth_cat)) %>% select(SampleID, WOL, growth_cat, metab, umol_g) %>% count(WOL, growth_cat, metab) %>% group_by(WOL, growth_cat) %>% summarise(`Average Sample Size`=mean(n)) %>% ungroup(), caption = "Sample sizes in growth faltering groups (averaged over all metabolites)")
+
+```
+
+
+
+\newpage
+SCFAs - only acetate, butyrate, propionate, lactate, formate, succinate
+Trajectory of SCFAs
+```{r fig2eSCFA, fig.width=7, fig.height=5}
+stool_metab_long %>%
+  filter(metab %in% c("Acetate", "Butyrate", "Propionate", "Lactate", "Succinate", "Formate")) %>%
+  right_join(s2, by="SampleID") %>%
+  filter(!is.na(metab)) %>%
+  ggplot(aes(y=umol_g, x=WOL)) +
+    geom_point(shape=21, color="darkgrey") +
+    geom_boxplot(aes(group=WOL, fill=WOL), outlier.shape = NA) +
+    facet_wrap(~metab, scales="free") +
+    scale_fill_viridis_c() +
+  theme_bw() +
+  labs(y="Concentration (umol/g)") +
+  theme(panel.grid = element_blank())
+
+ggsave(here("Output", "FIG2E_stoolSCFAs_WOL_boxplots.pdf"), width = 7, height = 5, useDingbats = F, dpi = 400)
+
+```
+
+\newpage
+## Linear model  
+Metabolite change with age  
+```{r}
+props_toTest <- stool_metab_long %>%
+  filter(metab != "Glycerol") %>%
+  mutate(log10_umol_g = log10(umol_g))
+
+form1 = "log10_umol_g ~ WOL"
+# form2 = "log10_umol_g ~ WOL * growth_cat + npo_days_prop"
+# form3 = "log10_umol_g ~ WOL * growth_cat + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "metab", props_toTest = props_toTest, s_toTest = s_toTest, form1 = form1,rep_mes_label = random1, p_cutoff =  0.05) 
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  arrange(fdr) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log10 transformed concentrations of metabolites. Filtered with p.value < 0.05. SubjectID added as a random effect. Full formula: {form1}"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+table_export(summaries_df, "metabolites_analysis_table_")
+
+```
+
+
+\newpage
+# All age significant metabolites  
+```{r fig2eSIG, fig.width=15, fig.height=6}
+sig_metab <- summaries_df %>% filter(fdr<0.05, term == "WOL") %>% pull(metab)
+stool_metab_long %>%
+  filter(metab %in% sig_metab) %>%
+  right_join(s2, by="SampleID") %>%
+  filter(!is.na(metab)) %>%
+  left_join(summaries_df %>% filter(fdr<0.05, term == "WOL"), by = "metab") %>%
+  group_by(metab) %>% mutate(median=median(umol_g), max=max(umol_g)) %>%
+  ungroup() %>%
+  mutate(metab = fct_reorder(metab, -umol_g)) %>%
+  ggplot(aes(y=umol_g, x=WOL)) +
+    geom_point(shape=21, color="darkgrey") +
+    geom_boxplot(aes(group=WOL, fill=WOL), outlier.shape=NA) +
+    geom_text(mapping = aes(label = paste0("q=", scientific(fdr, digits = 2)), x=8, y=max*.99), size = 3, check_overlap = T) +
+    facet_wrap(~metab, scales="free", ncol=7) +
+    scale_fill_viridis_c(alpha=0.8) +
+  scale_y_continuous(transform="log10") +
+  theme_bw() +
+  theme(panel.grid = element_blank()) +
+  labs(y="Concentration (umol/g log-scale)")
+
+ggsave(here("Output", "FIG2E_stoolmetabolites_fdr05_WOL_boxplots.pdf"), width = 15, height = 6, useDingbats = F, dpi = 400)
+```
+
+
+# All metabolites squiggles  
+```{r fig.width=10, fig.height=8}
+lod=min(stool_metab_long %>% pull(umol_g), na.rm = T)
+stool_metab_long %>% select(!HOL) %>%
+  right_join(s2, by = "SampleID") %>%
+  mutate(`Growth Faltering` = factor(x = growth_cat, labels = c("none", "mild faltering", "moderate to severe faltering"))) %>%
+  filter(!is.na(growth_cat), !is.na(metab), metab != "Glycerol") %>%
+  ggplot(aes(y=umol_g, x=HOL)) +
+    # geom_hline(aes(yintercept = lod),  lty=2) +
+    geom_point(aes(color=`Growth Faltering`), alpha=0.1) +
+    geom_smooth(aes(color=`Growth Faltering`, group = `Growth Faltering`), se = F) +  
+    scale_color_manual(values = as.character(ann_colors$growth_cat)) +
+    scale_y_continuous(transform = "log10", limits = c(lod, NA), labels = signif) +
+    theme_bw() +
+  theme(legend.position = "bottom", panel.grid = element_blank(), text = element_text(size=10, color="black"), axis.text = element_text(size=8, color="black"), strip.text = element_text(size=8, color="black"), legend.text = element_text(size=10, color="black")) +    
+  facet_wrap(~metab, ncol=7, scales="free_y") +
+  # labs(y="Relative Abundance", x="Hours of Life")
+ labs(y="Concentration (umol/g log-scale)")
+
+ggsave(here("Output", "NEW_ALL_stoolmetabolites_GrFaltering.pdf"), width = 10, height = 8, useDingbats = F, dpi = 600)
+
+stool_metab_long %>% select(!HOL) %>%
+  right_join(s2, by = "SampleID") %>%
+  # mutate(`Growth Faltering` = factor(x = growth_cat, labels = c("none", "mild faltering", "moderate to severe faltering"))) %>%
+  filter(!is.na(growth_cat), !is.na(metab), metab != "Glycerol") %>%
+  ggplot(aes(y=umol_g, x=HOL)) +
+    geom_point(aes(color=growth_failure), alpha=0.1) +
+    geom_smooth(aes(color=growth_failure, group=growth_failure), se = F) +  
+    scale_color_manual(values = as.character(ann_colors$growth_failure)) +
+    scale_y_continuous(transform = "log10", limits = c(lod, NA), labels = signif) +
+    theme_bw() +
+  theme(legend.position = "bottom", panel.grid = element_blank(), text = element_text(size=10, color="black"), axis.text = element_text(size=8, color="black"), strip.text = element_text(size=8, color="black"), legend.text = element_text(size=10, color="black")) +    
+  facet_wrap(~metab, ncol=7, scales="free_y") +
+  # labs(y="Relative Abundance", x="Hours of Life")
+ labs(y="Concentration (umol/g log-scale)", color="Growth failure")
+
+ggsave(here("Output", "NEW_ALL_stoolmetabolites_GrFailure.pdf"), width = 10, height = 8, useDingbats = F, dpi = 600)
+```
+
+\newpage
+# SUPP FIGURE 3A - Metabolites over age by growth category   
+## Linear models (grouped metabs)
+```{r}
+props_toTest <- metab_summarised %>%
+  rownames_to_column("metab") %>%
+  pivot_longer(!metab, names_to = "SampleID", values_to = "umol_g") %>%
+  # inner_join(s2 %>% select(SampleID, growth_cat, growth_failure, TimePoint, SubjectID, WOL), by = "SampleID") %>%
+  filter(!is.na(metab), metab!="Glycerol") %>%
+  mutate(log10_umol_g = log10(umol_g + min(metab_summarised[metab_summarised>0])/10))
+
+form1 = "log10_umol_g ~ WOL * growth_cat"
+form2 = "log10_umol_g ~ WOL * growth_cat + npo_days_prop"
+form3 = "log10_umol_g ~ WOL * growth_cat + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "metab", props_toTest = props_toTest, s_toTest = s2 %>% select(SampleID, growth_cat, growth_failure, TimePoint, SubjectID, WOL), form1 = form1, rep_mes_label = random1, p_cutoff = .05) 
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log10 transformed concentrations of groups of metabolites. Filtered with p.value < 0.05. SubjectID added as a random effect. Full formula: {form1}"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+table_export(summaries_df, "metabolites_analysis_table_")
+
+```
+
+```{r supp3a, fig.height=5, fig.width=7}
+metab_summarised %>%
+  rownames_to_column("metab") %>%
+  pivot_longer(!metab, names_to = "SampleID", values_to = "umol_g") %>%
+  inner_join(s2 %>% select(SampleID, growth_cat, growth_failure, TimePoint, SubjectID, WOL), by = "SampleID") %>%
+  filter(!is.na(metab), metab!="Glycerol") %>%
+  mutate(metab = reorder(metab, -umol_g)) %>%
+  group_by(WOL, metab, growth_cat) %>%
+  mutate(mean=mean(umol_g), sd=sd(umol_g), n=n()) %>%
+  ungroup() %>%
+  mutate(se = sd/sqrt(n)) %>%
+  mutate(metab = fct_reorder(metab, -umol_g)) %>%
+  arrange(growth_cat) %>%
+  ggplot(aes(y=umol_g, x=WOL, group=growth_cat, color=growth_cat)) +
+    geom_point(size=1.2, aes(shape=growth_cat), alpha=0.5) +
+    geom_smooth(size=0.8, aes(fill=growth_cat), se=F) +
+    # geom_point(size=1, aes(y=mean,shape=growth_cat)) +
+    facet_wrap(~metab, scales="free") +
+    scale_color_manual(values = ann_colors$growth_cat) +
+    scale_fill_manual(values = ann_colors$growth_cat) +
+    scale_shape_manual(values = c(21, 22, 23)) +
+   # scale_y_continuous(limit=c(0,NA),oob=squish) +
+  theme_bw() +
+  theme(legend.position = "bottom", , panel.grid = element_blank()) +
+  labs(fill="Growth", color="Growth", shape="Growth", y='Concentration (umol/g)')
+ggsave(here("Output", "SUPP_FIG3A_stoolmetabolites_growthcat_grouped.pdf"), width = 7, height = 5, useDingbats = F, dpi = 400)
+```
+
+## Week by week  
+```{r fig.height=9, fig.width=8}
+myform="log10_umol_g ~ study_group"
+
+summaries_df <- props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, WOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  group_by(WOL, metab, study_group, sample_type) %>%
+    mutate(mean=mean(log10_umol_g)) %>%
+  ungroup() %>%
+  
+  group_by(metab) %>% mutate(max=max(mean)) %>% ungroup() %>%
+  
+  group_by(metab, WOL) %>%
+    mutate(ngroups=n_distinct(study_group)) %>%
+  ungroup() %>%
+  
+  filter(ngroups>=2) %>% # Only test PMA_rounded where you have both study groups
+  
+  group_by(metab, WOL, max) %>%
+    do(tidy(lm(as.formula(myform), data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "", term)) %>%
+  
+  group_by(term, WOL) %>%
+    mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, WOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  group_by(WOL, metab, study_group, sample_type) %>%
+    summarise(mean=mean(log10_umol_g), sd=sd(log10_umol_g), n=n(), max=max(log10_umol_g)) %>%
+  ungroup() %>%
+  mutate(se=sd/sqrt(n)) %>%
+  ggplot(aes(y=10^(mean), x=WOL)) +
+    # geom_vline(aes(xintercept = PMA_rounded), lwd=0.3, color="grey") + # guide lines
+    geom_line(aes(color=study_group, group = study_group)) +  
+    geom_point(aes(color=study_group)) +
+    geom_point(data = summaries_df %>% filter(fdr<0.1, term==levels(s2$growth_cat)[2]), mapping = aes(color=term, x=WOL, y=10^(max*1.75)), shape=8) +
+    geom_point(data = summaries_df %>% filter(fdr>=0.1, p.value<0.05, term==levels(s2$growth_cat)[2]), mapping = aes(color=term, x=WOL, y=10^(max*1.75)), shape=23) +
+    geom_point(data = summaries_df %>% filter(fdr<0.1, term==levels(s2$growth_cat)[3]), mapping = aes(color=term, x=WOL, y=10^(max*2)), shape=8) +
+    geom_point(data = summaries_df %>% filter(fdr>=0.1, p.value<0.05, term==levels(s2$growth_cat)[3]), mapping = aes(color=term, x=WOL, y=10^(max*2)), shape=23) +
+    scale_color_manual(values = ann_colors$growth_cat) +
+    scale_y_continuous(transform = "log10") +
+    theme_bw() +
+  theme(legend.position = "bottom") +
+    theme(panel.grid = element_blank()) +
+    geom_errorbar(aes(ymin = 10^(mean-se), ymax=10^(mean+se), color=study_group), alpha=0.5, width = 0.3) +
+    facet_wrap(~metab, ncol=3, scales="free_y") +
+  labs(y="Concentration (umol/g log-scale)")
+```
+
+Linear models were used to estimate the differences between study groups at each week of life. The relative abundances were log10 transformed. Multiple tests were adjusted for false discovery rate using Benjamini-Hochberg method. Only the terms with p<0.1 are shown in the table below.
+
+For each week of life (WOL):  
+lm(`r myform`)
+
+```{r}
+# table_export(summaries_df, "Taxonomic_table_export")
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  pander(split.tab=Inf, emphasize.strong.rows = which(.$fdr<=0.05)) #%>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+
+rm(myform)
+```
+
+## Monthly  
+(every 4 weeks)   
+```{r fig.height=9, fig.width=8}
+myform="log10_umol_g ~ study_group"
+
+summaries_df <- props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, MOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  group_by(MOL, metab, study_group, sample_type) %>%
+    mutate(mean=mean(log10_umol_g)) %>%
+  ungroup() %>%
+  
+  group_by(metab) %>% mutate(maxmean=max(mean), max=max(log10_umol_g)) %>% ungroup() %>%
+  
+  group_by(metab, MOL) %>%
+    mutate(ngroups=n_distinct(study_group)) %>%
+  ungroup() %>%
+  
+  filter(ngroups>=2) %>% # Only test PMA_rounded where you have both study groups
+  
+  group_by(metab, MOL, max) %>%
+    do(tidy(lm(as.formula(myform), data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "", term)) %>%
+  
+  group_by(term, MOL) %>%
+    mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, MOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  group_by(MOL, metab, study_group, sample_type) %>%
+    summarise(mean=mean(log10_umol_g), sd=sd(log10_umol_g), n=n()) %>%
+  ungroup() %>%
+  mutate(se=sd/sqrt(n)) %>%
+  ggplot(aes(y=10^(mean), x=MOL)) +
+    # geom_vline(aes(xintercept = PMA_rounded), lwd=0.3, color="grey") + # guide lines
+    geom_line(aes(color=study_group, group = study_group)) +  
+    geom_point(aes(color=study_group)) +
+    geom_point(data = summaries_df %>% filter(fdr<0.1, term==levels(s2$growth_cat)[2]), mapping = aes(color=term, x=MOL, y=10^(max*1.25)), shape=8) +
+    geom_point(data = summaries_df %>% filter(fdr>=0.1, p.value<0.05, term==levels(s2$growth_cat)[2]), mapping = aes(color=term, x=MOL, y=10^(max*1.25)), shape=23) +
+    geom_point(data = summaries_df %>% filter(fdr<0.1, term==levels(s2$growth_cat)[3]), mapping = aes(color=term, x=MOL, y=10^(max*1.3)), shape=8) +
+    geom_point(data = summaries_df %>% filter(fdr>=0.1, p.value<0.05, term==levels(s2$growth_cat)[3]), mapping = aes(color=term, x=MOL, y=10^(max*1.3)), shape=23) +
+    scale_color_manual(values = ann_colors$growth_cat) +
+    scale_y_continuous(transform = "log10") +
+    theme_bw() +
+  theme(legend.position = "bottom") +
+    theme(panel.grid = element_blank()) +
+    geom_errorbar(aes(ymin = 10^(mean-se), ymax=10^(mean+se), color=study_group), alpha=0.5, width = 0.3) +
+    facet_wrap(~metab, ncol=3, scales="free_y") +
+  labs(y="Concentration (umol/g log-scale)", title = "")
+```
+
+Linear models were used to estimate the differences between study groups at each week of life. The relative abundances were log10 transformed. Multiple tests were adjusted for false discovery rate using Benjamini-Hochberg method. Only the terms with p<0.1 are shown in the table below.
+
+For each week of life (MOL):  
+lm(`r myform`)
+
+```{r}
+# table_export(summaries_df, "Taxonomic_table_export")
+
+summaries_df %>%
+  # filter(p.value < 0.1) %>%
+  pander(split.tab=Inf, emphasize.strong.rows = which(.$fdr<=0.05)) #%>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+
+rm(myform)
+```
+
+\newpage
+# FIG 2E - select metabolites over time by growth category  
+## Linear model - growth cateogry change with age
+Growth category change with age  
+```{r}
+props_toTest <- stool_metab_long %>%
+  filter(metab != "Glycerol") %>%
+  mutate(log10_umol_g = log10(umol_g))
+
+form1 = "log10_umol_g ~ WOL * growth_cat"
+form1m = "log10_umol_g ~ MOL * growth_cat"
+form2 = "log10_umol_g ~ WOL * growth_cat + npo_days_prop"
+form3 = "log10_umol_g ~ WOL * growth_cat + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+# Growth category WOL
+summaries_df <- run_lmer_on_props(factor_to_test = "metab", props_toTest = props_toTest, s_toTest = s_toTest, form1 = form1,rep_mes_label = random1, p_cutoff = .05) 
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log10 transformed concentrations of metabolites. Filtered with p.value < 0.05. SubjectID added as a random effect. Full formula: {form1}"), emphasize.strong.rows = which(.$fdr<=0.05))
+table_export(summaries_df, "metabolites_analysis_table_")
+
+# Growth category MOL
+summaries_df <- run_lmer_on_props(factor_to_test = "metab", props_toTest = props_toTest, s_toTest = s_toTest, form1 = form1m,rep_mes_label = random1, p_cutoff = .05) 
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log10 transformed concentrations of metabolites. Filtered with p.value < 0.05. SubjectID added as a random effect. Full formula: {form1m}"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+table_export(summaries_df, "metabolites_analysis_table_")
+
+```
+
+```{r fig.height=3, fig.width=8}
+# sig_metab <- summaries_df %>% filter(fdr<0.2) %>% pull(metab)
+stool_metab_long %>%
+  # filter(metab %in% unique(summaries_df$metab)) %>%
+  filter(metab %in% c("Butyrate", "Propionate", "Isovalerate", "Dimethylamine")) %>%
+  right_join(s2, by="SampleID") %>%
+  filter(!is.na(metab), metab!="Glycerol") %>%
+  group_by(WOL, metab, growth_cat) %>%
+  mutate(mean=mean(umol_g), sd=sd(umol_g), n=n()) %>%
+  ungroup() %>%
+  mutate(se = sd/sqrt(n)) %>%
+  mutate(metab = fct_reorder(metab, -umol_g)) %>%
+  arrange(growth_cat) %>%
+  ggplot(aes(y=umol_g, x=WOL, group=growth_cat, color=growth_cat)) +
+    geom_point(aes(shape=growth_cat), alpha=0.5) +
+    geom_smooth(aes(fill=growth_cat), se=F) +
+    # geom_point(aes(y=mean, shape=growth_failure)) +
+    # geom_errorbar(aes(ymin=mean-se, ymax=mean+se)) +
+    facet_wrap(~metab, scales="free_y", ncol=7) +
+    scale_color_manual(values = ann_colors$growth_cat) +
+    scale_fill_manual(values = ann_colors$growth_cat) +
+    scale_shape_manual(values = c(21, 22, 24)) +
+   # scale_y_continuous(limit=c(0,NA),oob=squish) +
+  theme_bw() +
+  theme(legend.position = "bottom", panel.grid = element_blank()) +
+  labs(fill="Growth Category", color="Growth Category", shape="Growth Category", y='Concentration (umol/g)')
+ggsave(here("Output", "FIG2E_metabolites_age_growthcategory_subset.pdf"), width = 8, height = 3, useDingbats = F, dpi = 400)
+```
+
+## Week by week  
+\newpage
+```{r fig.height=14, fig.width=9, out.width="5.5in"}
+myform="log10_umol_g ~ study_group"
+
+summaries_df <- props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, WOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  group_by(WOL, metab, study_group, sample_type) %>%
+    mutate(mean=mean(log10_umol_g)) %>%
+  ungroup() %>%
+  
+  group_by(metab) %>% mutate(max=max(mean)) %>% ungroup() %>%
+  
+  group_by(metab, WOL) %>%
+    mutate(ngroups=n_distinct(study_group)) %>%
+  ungroup() %>%
+  
+  filter(ngroups>=2) %>% # Only test PMA_rounded where you have both study groups
+  
+  group_by(metab, WOL, max) %>%
+    do(tidy(lm(as.formula(myform), data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "", term)) %>%
+  
+  group_by(term, WOL) %>%
+    mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, WOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  mutate(Taxa = reorder(metab, -log10_umol_g)) %>%
+  mutate(Taxa = fct_relabel(Taxa, function(x) gsub(" ", "\n", x))) %>%
+  group_by(WOL, metab, study_group, sample_type) %>%
+    summarise(mean=mean(log10_umol_g), sd=sd(log10_umol_g), n=n(), max=max(log10_umol_g)) %>%
+  ungroup() %>%
+  mutate(se=sd/sqrt(n)) %>%
+  ggplot(aes(y=10^(mean), x=WOL)) +
+    # geom_vline(aes(xintercept = PMA_rounded), lwd=0.3, color="grey") + # guide lines
+    geom_line(aes(color=study_group, group = study_group)) +  
+    geom_point(aes(color=study_group)) +
+    geom_point(data = summaries_df %>% filter(fdr<0.1, term==levels(s2$growth_cat)[2]), mapping = aes(color=term, x=WOL, y=10^(max*1.75)), shape=8) +
+    geom_point(data = summaries_df %>% filter(fdr>=0.1, p.value<0.05, term==levels(s2$growth_cat)[2]), mapping = aes(color=term, x=WOL, y=10^(max*1.75)), shape=23) +
+    geom_point(data = summaries_df %>% filter(fdr<0.1, term==levels(s2$growth_cat)[3]), mapping = aes(color=term, x=WOL, y=10^(max*2)), shape=8) +
+    geom_point(data = summaries_df %>% filter(fdr>=0.1, p.value<0.05, term==levels(s2$growth_cat)[3]), mapping = aes(color=term, x=WOL, y=10^(max*2)), shape=23) +
+    scale_color_manual(values = ann_colors$growth_cat) +
+    scale_y_continuous(transform = "log10") +
+    theme_bw() +
+  theme(legend.position = "bottom") +
+    theme(panel.grid = element_blank()) +
+    geom_errorbar(aes(ymin = 10^(mean-se), ymax=10^(mean+se), color=study_group), alpha=0.5, width = 0.3) +
+    facet_wrap(~metab, ncol=3, scales="free_y") +
+  labs(y="Concentration (umol/g log-scale)")
+```
+
+Linear models were used to estimate the differences between study groups at each week of life. The relative abundances were log10 transformed. Multiple tests were adjusted for false discovery rate using Benjamini-Hochberg method. Only the terms with p<0.1 are shown in the table below.
+
+For each week of life (WOL):  
+lm(`r myform`)
+
+```{r}
+# table_export(summaries_df, "Taxonomic_table_export")
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  pander(split.tab=Inf, emphasize.strong.rows = which(.$fdr<=0.05)) #%>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+
+rm(myform)
+```
+
+## Monthly  
+\newpage
+```{r fig.height=14, fig.width=9, out.width="5.5in"}
+myform="log10_umol_g ~ study_group"
+
+summaries_df <- props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, MOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  group_by(MOL, metab, study_group, sample_type) %>%
+    mutate(mean=mean(log10_umol_g)) %>%
+  ungroup() %>%
+  
+  group_by(metab) %>% mutate(max=max(mean)) %>% ungroup() %>%
+  
+  group_by(metab, MOL) %>%
+    mutate(ngroups=n_distinct(study_group)) %>%
+  ungroup() %>%
+  
+  filter(ngroups>=2) %>% # Only test PMA_rounded where you have both study groups
+  
+  group_by(metab, MOL, max) %>%
+    do(tidy(lm(as.formula(myform), data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "", term)) %>%
+  
+  group_by(term, MOL) %>%
+    mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_cat, sample_type=SampleType, TimePoint, SubjectID, MOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  mutate(Taxa = reorder(metab, -log10_umol_g)) %>%
+  mutate(Taxa = fct_relabel(Taxa, function(x) gsub(" ", "\n", x))) %>%
+  group_by(MOL, metab, study_group, sample_type) %>%
+    summarise(mean=mean(log10_umol_g), sd=sd(log10_umol_g), n=n(), max=max(log10_umol_g)) %>%
+  ungroup() %>%
+  mutate(se=sd/sqrt(n)) %>%
+  ggplot(aes(y=10^(mean), x=MOL)) +
+    # geom_vline(aes(xintercept = PMA_rounded), lwd=0.3, color="grey") + # guide lines
+    geom_line(aes(color=study_group, group = study_group)) +  
+    geom_point(aes(color=study_group)) +
+    geom_point(data = summaries_df %>% filter(fdr<0.1, term==levels(s2$growth_cat)[2]), mapping = aes(color=term, x=MOL, y=35), shape=8) +
+    geom_point(data = summaries_df %>% filter(fdr>=0.1, p.value<0.05, term==levels(s2$growth_cat)[2]), mapping = aes(color=term, x=MOL, y=35), shape=23) +
+    geom_point(data = summaries_df %>% filter(fdr<0.1, term==levels(s2$growth_cat)[3]), mapping = aes(color=term, x=MOL, y=20), shape=8) +
+    geom_point(data = summaries_df %>% filter(fdr>=0.1, p.value<0.05, term==levels(s2$growth_cat)[3]), mapping = aes(color=term, x=MOL, y=20), shape=23) +
+    scale_color_manual(values = ann_colors$growth_cat) +
+    scale_y_continuous(transform = "log10") +
+    theme_bw() +
+  theme(legend.position = "bottom") +
+    theme(panel.grid = element_blank()) +
+    geom_errorbar(aes(ymin = 10^(mean-se), ymax=10^(mean+se), color=study_group), alpha=0.5, width = 0.3) +
+    facet_wrap(~metab, ncol=3, scales="free_y") +
+  labs(y="Concentration (umol/g log-scale)")
+```
+
+Linear models were used to estimate the differences between study groups at each week of life. The relative abundances were log10 transformed. Multiple tests were adjusted for false discovery rate using Benjamini-Hochberg method. Only the terms with p<0.1 are shown in the table below.
+
+For each week of life (MOL):  
+lm(`r myform`)
+
+```{r}
+# table_export(summaries_df, "Taxonomic_table_export")
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  pander(split.tab=Inf, emphasize.strong.rows = which(.$fdr<=0.05)) #%>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+
+rm(myform)
+```
+
+\newpage
+```{r suppfig3b, fig.width=10, fig.height=8, eval=T}
+# SUPP FIGURE 3B - Metabolites (all) over time by growth failure   
+# Supp 3A but no grouping
+stool_metab_long %>%
+  right_join(s2, by="SampleID") %>%
+  filter(!is.na(metab), metab!="Glycerol") %>%
+  group_by(WOL, metab, growth_failure) %>%
+  mutate(mean=mean(umol_g), sd=sd(umol_g), n=n()) %>%
+  ungroup() %>%
+  mutate(se = sd/sqrt(n)) %>%
+  mutate(metab = fct_reorder(metab, -umol_g)) %>%
+  arrange(growth_failure) %>%
+  ggplot(aes(y=umol_g, x=WOL, group=growth_failure, color=growth_failure)) +
+    geom_point(aes(shape=growth_failure), alpha=0.7) +
+    geom_smooth(aes(fill=growth_failure), se=F) +
+    # geom_point(aes(y=mean, shape=growth_failure)) +
+    # geom_errorbar(aes(ymin=mean-se, ymax=mean+se)) +
+    facet_wrap(~metab, scales="free_y", ncol=7) +
+    scale_color_manual(values = ann_colors$growth_failure) +
+    scale_fill_manual(values = ann_colors$growth_failure) +
+    scale_shape_manual(values = c(21, 24)) +
+   # scale_y_continuous(limit=c(0,NA),oob=squish) +
+  theme_bw() +
+  theme(legend.position = "bottom", panel.grid = element_blank()) +
+  labs(fill="Growth Failure", color="Growth Failure", shape="Growth Failure", y='Concentration (umol/g)')
+ggsave(here("Output", "SUPP_FIG3B_stoolmetabolites_growthfailure_ungrouped.pdf"), width = 10, height = 8, useDingbats = F, dpi = 400)
+```
+## Metabolites (all) over time by growth failure Linear models  
+Growth failure change with age  
+```{r}
+props_toTest <- stool_metab_long %>%
+  filter(metab != "Glycerol") %>%
+  mutate(log10_umol_g = log10(umol_g))
+
+form1 = "log10_umol_g ~ WOL * growth_failure"
+form1m = "log10_umol_g ~ MOL * growth_failure"
+form2 = "log10_umol_g ~ WOL * growth_failure + npo_days_prop"
+form3 = "log10_umol_g ~ WOL * growth_failure + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+# Growth failure WOL
+summaries_df <- run_lmer_on_props(factor_to_test = "metab", props_toTest = props_toTest, s_toTest = s_toTest, form1 = form1,rep_mes_label = random1, p_cutoff = .05) 
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log10 transformed concentrations of metabolites. Filtered with p.value < 0.05. SubjectID added as a random effect. Full formula: {form1}"), emphasize.strong.rows = which(.$fdr<=0.05))
+table_export(summaries_df, "metabolites_analysis_table_")
+
+# Growth failure MOL
+summaries_df <- run_lmer_on_props(factor_to_test = "metab", props_toTest = props_toTest, s_toTest = s_toTest, form1 = form1m,rep_mes_label = random1, p_cutoff = .05) 
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log10 transformed concentrations of metabolites. Filtered with p.value < 0.05. SubjectID added as a random effect. Full formula: {form1m}"), emphasize.strong.rows = which(.$fdr<=0.05))
+table_export(summaries_df, "metabolites_analysis_table_")
+```
+
+# alt SUPP FIG 3b - grouped
+
+```{r supp3bGROUPED, fig.height=5, fig.width=7, eval=T}
+props_toTest <- metab_summarised %>%
+  rownames_to_column("metab") %>%
+  pivot_longer(!metab, names_to = "SampleID", values_to = "umol_g") %>%
+  mutate(log10_umol_g = log10(umol_g + min(metab_summarised[metab_summarised>0])/10))
+
+summaries_df <- run_lmer_on_props(factor_to_test = "metab", props_toTest = props_toTest %>% filter(!is.na(metab), metab!="Glycerol"), s_toTest = s2 %>% select(SampleID, growth_failure, sample_type=SampleType, TimePoint, SubjectID, WOL), form1 = "log10_umol_g ~ WOL * growth_failure",rep_mes_label = "SubjectID", p_cutoff = 1) 
+table_export(summaries_df, "metabolites_analysis_table_SuppFig6C_")
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log10 transformed concentrations of metabolites. Filtered with p.value < 0.05. SubjectID added as a random effect. Full formula: log10_umol_g ~ WOL"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+props_toTest %>%
+  inner_join(s2 %>% select(SampleID, growth_failure, sample_type=SampleType, TimePoint, SubjectID, WOL), by = "SampleID") %>%
+  filter(!is.na(metab), metab!="Glycerol") %>%
+  mutate(metab = reorder(metab, -umol_g)) %>%
+  group_by(WOL, metab, growth_failure) %>%
+  mutate(mean=mean(umol_g), sd=sd(umol_g), n=n()) %>%
+  ungroup() %>%
+  mutate(se = sd/sqrt(n)) %>%
+  mutate(metab = fct_reorder(metab, -umol_g)) %>%
+  arrange(growth_failure) %>%
+  ggplot(aes(y=umol_g, x=WOL, group=growth_failure, color=growth_failure)) +
+    geom_point(aes(shape=growth_failure), alpha=0.5) +
+    geom_smooth(size=1, aes(fill=growth_failure), se=F) +
+    facet_wrap(~metab, scales="free") +
+    # scale_color_aaas() +
+    scale_color_manual(values = ann_colors$growth_failure) +
+    # scale_fill_aaas() +
+    scale_fill_manual(values = ann_colors$growth_failure) +
+    scale_shape_manual(values = c(21, 24)) +
+   # scale_y_continuous(limit=c(0,NA),oob=squish) +
+  theme_bw() +
+  theme(legend.position = "bottom", panel.grid = element_blank()) +
+  labs(fill="Growth Failure", color="Growth Failure", shape="Growth Failure", y='Concentration (umol/g)')
+ggsave(here("Output", "SUPP_FIG3A_stoolmetabolites_growthfail_grouped.pdf"), width = 7, height = 5, useDingbats = F, dpi = 400)
+```
+
+
+## Week by week  
+```{r fig.height=12, fig.width=8}
+myform="log10_umol_g ~ study_group"
+
+props_toTest <- stool_metab_long %>%
+  filter(metab != "Glycerol") %>%
+  mutate(log10_umol_g = log10(umol_g))
+
+summaries_df <- props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, WOL, AbxHoursPerHOL), by = "SampleID") %>%
+  filter(!is.na(study_group), metab != "Glycerol") %>%
+  group_by(WOL, metab, study_group, sample_type) %>%
+    mutate(mean=mean(log10_umol_g)) %>%
+  ungroup() %>%
+  
+  group_by(metab) %>% mutate(max=max(mean)) %>% ungroup() %>%
+  
+  group_by(metab, WOL) %>%
+    mutate(ngroups=n_distinct(study_group)) %>%
+  ungroup() %>%
+  
+  filter(ngroups==2) %>% # Only test PMA_rounded where you have both study groups
+  
+  group_by(metab, WOL, max) %>%
+  # summarise(n=n())
+    do(tidy(lm(as.formula(myform), data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "", term)) %>%
+  
+  group_by(term, WOL) %>%
+    mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, WOL, AbxHoursPerHOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  mutate(Taxa = reorder(metab, -log10_umol_g)) %>%
+  mutate(Taxa = fct_relabel(Taxa, function(x) gsub(" ", "\n", x))) %>%
+  group_by(WOL, metab, study_group, sample_type) %>%
+    summarise(mean=mean(log10_umol_g), sd=sd(log10_umol_g), n=n(), max=max(log10_umol_g)) %>%
+  ungroup() %>%
+  mutate(se=sd/sqrt(n)) %>%
+  ggplot(aes(y=10^(mean), x=WOL)) +
+    # geom_vline(aes(xintercept = PMA_rounded), lwd=0.3, color="grey") + # guide lines
+    geom_line(aes(color=study_group, group = study_group)) +  
+    geom_point(shape=21) +
+    geom_point(data = summaries_df %>% filter(fdr<0.1), mapping = aes(x=WOL, y=10^(max*1.75)), shape=8, color="darkred") +
+    geom_point(data = summaries_df %>% filter(p.value<0.05), mapping = aes(x=WOL, y=10^(max)+5), shape=23, color="red", fill="yellow") +
+    # geom_point(data = summaries_df %>% filter(fdr<0.1, term=="moderate to severe retardation"), mapping = aes(color=term, x=WOL, y=10^(max*2)), shape=8) +
+    scale_color_aaas() +
+    # scale_color_manual(values = ann_colors$growth_failure) +
+    scale_y_continuous(transform = "log10") +
+    theme_bw() +
+  theme(legend.position = "bottom") +
+    theme(panel.grid = element_blank()) +
+    geom_errorbar(aes(ymin = 10^(mean-se), ymax=10^(mean+se), color=study_group), alpha=0.5, width = 0.3) +
+    facet_wrap(~metab, ncol=3, scales="free_y") +
+  labs(y="Concentration (umol/g log-scale)")
+```
+
+Linear models were used to estimate the differences between study groups at each week of life. The relative abundances were log10 transformed. Multiple tests were adjusted for false discovery rate using Benjamini-Hochberg method. Only the terms with p<0.1 are shown in the table below.
+
+For each week of life (WOL):  
+lm(`r myform`)
+
+```{r}
+# table_export(summaries_df, "Taxonomic_table_export")
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  pander(split.tab=Inf, emphasize.strong.rows = which(.$fdr<=0.05)) #%>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+
+rm(myform)
+```
+
+
+## Monthly  
+```{r fig.height=12, fig.width=8}
+myform="log10_umol_g ~ study_group"
+
+props_toTest <- stool_metab_long %>%
+  filter(metab != "Glycerol") %>%
+  mutate(log10_umol_g = log10(umol_g))
+
+summaries_df <- props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, MOL, AbxHoursPerHOL), by = "SampleID") %>%
+  filter(!is.na(study_group), metab != "Glycerol") %>%
+  group_by(MOL, metab, study_group, sample_type) %>%
+    mutate(mean=mean(log10_umol_g)) %>%
+  ungroup() %>%
+  
+  group_by(metab) %>% mutate(max=max(mean)) %>% ungroup() %>%
+  
+  group_by(metab, MOL) %>%
+    mutate(ngroups=n_distinct(study_group)) %>%
+  ungroup() %>%
+  
+  filter(ngroups==2) %>% # Only test PMA_rounded where you have both study groups
+  
+  group_by(metab, MOL, max) %>%
+  # summarise(n=n())
+    do(tidy(lm(as.formula(myform), data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "", term)) %>%
+  
+  group_by(term, MOL) %>%
+    mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, MOL, AbxHoursPerHOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  mutate(Taxa = reorder(metab, -log10_umol_g)) %>%
+  mutate(Taxa = fct_relabel(Taxa, function(x) gsub(" ", "\n", x))) %>%
+  group_by(MOL, metab, study_group, sample_type) %>%
+    summarise(mean=mean(log10_umol_g), sd=sd(log10_umol_g), n=n(), max=max(log10_umol_g)) %>%
+  ungroup() %>%
+  mutate(se=sd/sqrt(n)) %>%
+  ggplot(aes(y=10^(mean), x=MOL)) +
+    # geom_vline(aes(xintercept = PMA_rounded), lwd=0.3, color="grey") + # guide lines
+    geom_line(aes(color=study_group, group = study_group)) +  
+    geom_point(shape=21) +
+    geom_point(data = summaries_df %>% filter(fdr<0.1), mapping = aes(x=MOL, y=10^(max*1.75)), shape=8, color="darkred") +
+    geom_point(data = summaries_df %>% filter(p.value<0.05), mapping = aes(x=MOL, y=10^(max)+5), shape=23, color="red", fill="yellow") +
+    # geom_point(data = summaries_df %>% filter(fdr<0.1, term=="moderate to severe retardation"), mapping = aes(color=term, x=MOL, y=10^(max*2)), shape=8) +
+    scale_color_aaas() +
+    # scale_color_manual(values = ann_colors$growth_failure) +
+    scale_y_continuous(transform = "log10") +
+    theme_bw() +
+  theme(legend.position = "bottom") +
+    theme(panel.grid = element_blank()) +
+    geom_errorbar(aes(ymin = 10^(mean-se), ymax=10^(mean+se), color=study_group), alpha=0.5, width = 0.3) +
+    facet_wrap(~metab, ncol=4, scales="free_y") +
+  labs(y="Concentration (umol/g log-scale)")
+```
+
+Linear models were used to estimate the differences between study groups at each week of life. The relative abundances were log10 transformed. Multiple tests were adjusted for false discovery rate using Benjamini-Hochberg method. Only the terms with p<0.1 are shown in the table below.
+
+For each week of life (MOL):  
+lm(`r myform`)
+
+```{r}
+# table_export(summaries_df, "Taxonomic_table_export")
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  pander(split.tab=Inf, emphasize.strong.rows = which(.$fdr<=0.05)) #%>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+
+rm(myform)
+```
+
+## Week by week grouped metabolites   
+```{r fig.height=9, fig.width=8}
+myform="log10_umol_g ~ study_group"
+
+props_toTest <- metab_summarised %>%
+  rownames_to_column("metab") %>%
+  pivot_longer(!metab, names_to = "SampleID", values_to = "umol_g") %>%
+  mutate(log10_umol_g = log10(umol_g + min(metab_summarised[metab_summarised>0])/10))
+
+summaries_df <- props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, WOL, AbxHoursPerHOL), by = "SampleID") %>%
+  filter(!is.na(study_group), metab != "Glycerol") %>%
+  group_by(WOL, metab, study_group, sample_type) %>%
+    mutate(mean=mean(log10_umol_g)) %>%
+  ungroup() %>%
+  
+  group_by(metab) %>% mutate(max=max(mean)) %>% ungroup() %>%
+  
+  group_by(metab, WOL) %>%
+    mutate(ngroups=n_distinct(study_group)) %>%
+  ungroup() %>%
+  
+  filter(ngroups==2) %>% # Only test PMA_rounded where you have both study groups
+  
+  group_by(metab, WOL, max) %>%
+  # summarise(n=n())
+    do(tidy(lm(as.formula(myform), data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "", term)) %>%
+  
+  group_by(term, WOL) %>%
+    mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, WOL, AbxHoursPerHOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  mutate(Taxa = reorder(metab, -log10_umol_g)) %>%
+  mutate(Taxa = fct_relabel(Taxa, function(x) gsub(" ", "\n", x))) %>%
+  group_by(WOL, metab, study_group, sample_type) %>%
+    summarise(mean=mean(log10_umol_g), sd=sd(log10_umol_g), n=n(), max=max(log10_umol_g)) %>%
+  ungroup() %>%
+  mutate(se=sd/sqrt(n)) %>%
+  ggplot(aes(y=10^(mean), x=WOL)) +
+    # geom_vline(aes(xintercept = PMA_rounded), lwd=0.3, color="grey") + # guide lines
+    geom_line(aes(color=study_group, group = study_group)) +  
+    geom_point(shape=21) +
+    geom_point(data = summaries_df %>% filter(fdr<0.1), mapping = aes(x=WOL, y=10^(max*1.75)), shape=8, color="darkred") +
+    geom_point(data = summaries_df %>% filter(p.value<0.05), mapping = aes(x=WOL, y=10^(max*2)), shape=23, color="darkred") +
+    # geom_point(data = summaries_df %>% filter(fdr<0.1, term=="moderate to severe retardation"), mapping = aes(color=term, x=WOL, y=10^(max*2)), shape=8) +
+    scale_color_aaas() +
+    # scale_color_manual(values = ann_colors$growth_failure) +
+    scale_y_continuous(transform = "log10") +
+    theme_bw() +
+  theme(legend.position = "bottom") +
+    theme(panel.grid = element_blank()) +
+    geom_errorbar(aes(ymin = 10^(mean-se), ymax=10^(mean+se), color=study_group), alpha=0.5, width = 0.3) +
+    facet_wrap(~metab, ncol=3, scales="free_y") +
+  labs(y="Concentration (umol/g log-scale)")
+```
+
+Linear models were used to estimate the differences between study groups at each week of life. The relative abundances were log10 transformed. Multiple tests were adjusted for false discovery rate using Benjamini-Hochberg method. Only the terms with p<0.1 are shown in the table below.
+
+For each week of life (WOL):  
+lm(`r myform`)
+
+```{r}
+# table_export(summaries_df, "Taxonomic_table_export")
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  pander(split.tab=Inf, emphasize.strong.rows = which(.$fdr<=0.05)) #%>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+
+rm(myform)
+```
+
+## Monthly grouped metabolites   
+```{r fig.height=9, fig.width=8}
+myform="log10_umol_g ~ study_group"
+
+props_toTest <- metab_summarised %>%
+  rownames_to_column("metab") %>%
+  pivot_longer(!metab, names_to = "SampleID", values_to = "umol_g") %>%
+  mutate(log10_umol_g = log10(umol_g + min(metab_summarised[metab_summarised>0])/10))
+
+summaries_df <- props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, MOL, AbxHoursPerHOL), by = "SampleID") %>%
+  filter(!is.na(study_group), metab != "Glycerol") %>%
+  group_by(MOL, metab, study_group, sample_type) %>%
+    mutate(mean=mean(log10_umol_g)) %>%
+  ungroup() %>%
+  
+  group_by(metab) %>% mutate(max=max(mean)) %>% ungroup() %>%
+  
+  group_by(metab, MOL) %>%
+    mutate(ngroups=n_distinct(study_group)) %>%
+  ungroup() %>%
+  
+  filter(ngroups==2) %>% # Only test PMA_rounded where you have both study groups
+  
+  group_by(metab, MOL, max) %>%
+  # summarise(n=n())
+    do(tidy(lm(as.formula(myform), data=.))) %>%
+  ungroup() %>%
+  
+  filter(!grepl("Intercept|Residuals", term)) %>%
+  mutate(term = sub("study_group", "", term)) %>%
+  
+  group_by(term, MOL) %>%
+    mutate(fdr = p.adjust(p.value, method="BH")) %>%
+  ungroup()
+
+props_toTest %>%
+  inner_join(s2 %>% select(SampleID, study_group=growth_failure, sample_type=SampleType, TimePoint, SubjectID, MOL, AbxHoursPerHOL), by = "SampleID") %>%
+  filter(!is.na(study_group)) %>%
+  mutate(Taxa = reorder(metab, -log10_umol_g)) %>%
+  mutate(Taxa = fct_relabel(Taxa, function(x) gsub(" ", "\n", x))) %>%
+  group_by(MOL, metab, study_group, sample_type) %>%
+    summarise(mean=mean(log10_umol_g), sd=sd(log10_umol_g), n=n(), max=max(log10_umol_g)) %>%
+  ungroup() %>%
+  mutate(se=sd/sqrt(n)) %>%
+  ggplot(aes(y=10^(mean), x=MOL)) +
+    # geom_vline(aes(xintercept = PMA_rounded), lwd=0.3, color="grey") + # guide lines
+    geom_line(aes(color=study_group, group = study_group)) +  
+    geom_point(shape=21) +
+    geom_point(data = summaries_df %>% filter(fdr<0.1), mapping = aes(x=MOL, y=10), shape=8, color="darkred") +
+    geom_point(data = summaries_df %>% filter(p.value<0.05), mapping = aes(x=MOL, y=10), shape=23, color="darkred") +
+    # geom_point(data = summaries_df %>% filter(fdr<0.1, term=="moderate to severe retardation"), mapping = aes(color=term, x=MOL, y=10^(max*2)), shape=8) +
+    scale_color_aaas() +
+    # scale_color_manual(values = ann_colors$growth_failure) +
+    scale_y_continuous(transform = "log10") +
+    theme_bw() +
+  theme(legend.position = "bottom") +
+    theme(panel.grid = element_blank()) +
+    geom_errorbar(aes(ymin = 10^(mean-se), ymax=10^(mean+se), color=study_group), alpha=0.5, width = 0.2) +
+    facet_wrap(~metab, ncol=3, scales="free_y") +
+  labs(y="Concentration (umol/g log-scale)")
+```
+
+Linear models were used to estimate the differences between study groups at each week of life. The relative abundances were log10 transformed. Multiple tests were adjusted for false discovery rate using Benjamini-Hochberg method. Only the terms with p<0.1 are shown in the table below.
+
+For each week of life (MOL):  
+lm(`r myform`)
+
+```{r}
+# table_export(summaries_df, "Taxonomic_table_export")
+
+summaries_df %>%
+  filter(p.value < 0.05) %>%
+  pander(split.tab=Inf, emphasize.strong.rows = which(.$fdr<=0.05)) #%>%
+  #column_spec(c(2:5), width = "3em") ## if the table is running off the page, you can manually specify the width of the columns
+
+rm(myform)
+```
+
+\newpage
+# FIG 2F - select metabolites over time by growth failure  
+```{r fig.height=3, fig.width=8}
+# sig_metab <- summaries_df %>% filter(fdr<0.2) %>% pull(metab)
+stool_metab_long %>%
+  # filter(metab %in% unique(summaries_df$metab)) %>%
+  filter(metab %in% c("Butyrate", "Propionate", "Isovalerate", "Dimethylamine")) %>%
+  right_join(s2, by="SampleID") %>%
+  filter(!is.na(metab), metab!="Glycerol") %>%
+  group_by(WOL, metab, growth_failure) %>%
+  mutate(mean=mean(umol_g), sd=sd(umol_g), n=n()) %>%
+  ungroup() %>%
+  mutate(se = sd/sqrt(n)) %>%
+  mutate(metab = fct_reorder(metab, -umol_g)) %>%
+  arrange(growth_failure) %>%
+  ggplot(aes(y=umol_g, x=WOL, group=growth_failure, color=growth_failure)) +
+    geom_point(aes(shape=growth_failure), alpha=0.5) +
+    geom_smooth(aes(fill=growth_failure), se=F) +
+    # geom_point(aes(y=mean, shape=growth_failure)) +
+    # geom_errorbar(aes(ymin=mean-se, ymax=mean+se)) +
+    facet_wrap(~metab, scales="free_y", ncol=7) +
+    scale_color_manual(values = ann_colors$growth_failure) +
+    scale_fill_manual(values = ann_colors$growth_failure) +
+    scale_shape_manual(values = c(21, 24)) +
+   # scale_y_continuous(limit=c(0,NA),oob=squish) +
+  theme_bw() +
+  theme(legend.position = "bottom", panel.grid = element_blank()) +
+  labs(fill="Growth Failure", color="Growth Failure", shape="Growth Failure", y='Concentration (umol/g)')
+ggsave(here("Output", "FIG2F_metabolites_age_growthFail_subset.pdf"), width = 8, height = 3, useDingbats = F, dpi = 400)
+```
+
+
+\newpage
+# FIG 2C Linear model estimate lineplot log10_umol_g ~ growth_cat  
+```{r}
+summaries_df <- run_lmer_on_props(factor_to_test = "metab", props_toTest = stool_metab_long %>% filter(metab != "Glycerol") %>% mutate(log10_umol_g = log10(umol_g)), s_toTest = s_toTest, form1 = "log10_umol_g ~ growth_cat", rep_mes_label = "SubjectID", p_cutoff =  1) %>% mutate(term = str_remove(term, "growth_cat")) #%>% filter(!grepl(":", term))
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log10 transformed concentrations of metabolites. Filtered with p.value < 0.05. SubjectID added as a random effect. Full formula: log10_umol_g ~ growth_cat"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+summaries_df %>%
+  mutate(Significance = ifelse(fdr < 0.05, "q<0.05", "q>0.05")) %>%
+  arrange(Value) %>%
+  ggplot(aes(x=Value, y=fct_inorder(metab), color=term, group=term)) +
+  geom_vline(aes(xintercept = 0), lty=2) +
+  geom_linerange(aes(xmin = Value - Std.Error, xmax=Value + Std.Error), position=position_dodge(0.8)) +
+  geom_point(aes(shape=Significance), size=2, position=position_dodge(0.8)) +
+  scale_shape_manual(values = c(21, 16)) +
+  scale_color_manual(values = ann_colors$growth_cat) +
+  theme_bw() +
+  theme(legend.position = "bottom", panel.grid = element_blank()) +
+  labs(color="", y="Metabolite", x="Estimate", title="log10_umol_g ~ growth_cat")
+  
+ggsave(here("Output", "FIG2C_Metab_GrowthCat_LinearModEst.pdf"), width = 5, height = 8, useDingbats = F, dpi = 400)
+```
+
+\newpage
+# FIG 2X Linear model estimate lineplot
+```{r}
+summaries_df <- run_lmer_on_props(factor_to_test = "metab", props_toTest = stool_metab_long %>% filter(metab != "Glycerol") %>% mutate(log10_umol_g = log10(umol_g)), s_toTest = s_toTest, form1 = "log10_umol_g ~ growth_failure", rep_mes_label = "SubjectID", p_cutoff =  1) %>% mutate(term = str_remove(term, "growth_failure")) #%>% filter(!grepl(":", term))
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_failure")) %>%
+  arrange(p.value) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log10 transformed concentrations of metabolites. Filtered with p.value < 0.05. SubjectID added as a random effect. Full formula: log10_umol_g ~ growth_failure)"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+summaries_df %>%
+  mutate(Significance = ifelse(fdr < 0.05, "q<0.05", ifelse(fdr<0.1, "q<0.1", "q>0.05"))) %>%
+  arrange(Value) %>%
+  ggplot(aes(x=Value, y=fct_inorder(metab), color=term, group=term)) +
+  geom_vline(aes(xintercept = 0), lty=2) +
+  geom_linerange(aes(xmin = Value - Std.Error, xmax=Value + Std.Error), position=position_dodge(0.8)) +
+  geom_point(aes(shape=Significance), size=2, position=position_dodge(0.8)) +
+  scale_shape_manual(values = c(21, 22, 16)) +
+  scale_color_manual(values = ann_colors$growth_failure) +
+  theme_bw() +
+  theme(legend.position = "bottom", panel.grid = element_blank()) +
+  labs(color="", y="Metabolite", x="Estimate", title="log10_umol_g ~ growth_failure")
+  
+ggsave(here("Output", "FIG2D_Metab_GrowthFail_LinearModEst.pdf"), width = 5, height = 8, useDingbats = F, dpi = 400)
+```
+
+\newpage
+Growth category over time with NPO days  
+```{r}
+### Linear models of metabolites
+# number_of_top_pathways = 25
+props_toTest <- stool_metab_long %>%
+  filter(metab != "Glycerol") %>%
+  mutate(log10_umol_g = log10(umol_g))
+
+form1 = "log10_umol_g ~ WOL * growth_cat"
+form2 = "log10_umol_g ~ WOL * growth_cat + npo_days_prop"
+form3 = "log10_umol_g ~ WOL * growth_cat + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "metab", props_toTest = props_toTest, s_toTest = s_toTest, form1 = form2,rep_mes_label = random1, p_cutoff =  0.05) 
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log10 transformed concentrations of metabolites. Filtered with p.value < 0.05. SubjectID added as a random effect. Full formula: {form2}"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+# table_export(summaries_df, "metabolites_analysis_table_")
+
+```
+
+\newpage
+Growth category over time with Abx hours  
+```{r}
+### Linear models of metabolites
+# number_of_top_pathways = 25
+props_toTest <- stool_metab_long %>%
+  filter(metab != "Glycerol") %>%
+  mutate(log10_umol_g = log10(umol_g))
+
+form1 = "log10_umol_g ~ WOL * growth_cat"
+form2 = "log10_umol_g ~ WOL * growth_cat + npo_days_prop"
+form3 = "log10_umol_g ~ WOL * growth_cat + AbxHoursPerHOL"
+random1 = "SubjectID"
+
+summaries_df <- run_lmer_on_props(factor_to_test = "metab", props_toTest = props_toTest, s_toTest = s_toTest, form1 = form3,rep_mes_label = random1, p_cutoff =  0.05) 
+
+summaries_df %>%
+  mutate(term = str_remove(term, "growth_cat")) %>%
+  pander(split.table=Inf, digits=2, caption = glue("Linear models of log10 transformed concentrations of metabolites. Filtered with p.value < 0.05. SubjectID added as a random effect. Full formula: {form3}"), emphasize.strong.rows = which(.$fdr<=0.05))
+
+# table_export(summaries_df, "metabolites_analysis_table_")
+
+```
+
+
+
+\newpage
 
 # End of report
 
