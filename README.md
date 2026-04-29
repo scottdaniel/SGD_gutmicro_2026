@@ -14,3 +14,15 @@ You must run the R markdowns (Scripts/Rmds) in the following order so that the a
 6) Shotgun_random_forest_analysis.Rmd
 7) FIGURESANDTABLES.Rmd
 8) The Rmds in sensitivity/
+
+# Source data
+
+Decontaminated Fastq's are available from the following BioProjects:
+- https://www.ncbi.nlm.nih.gov/bioproject/PRJNA1301887
+- https://www.ncbi.nlm.nih.gov/bioproject/PRJNA872399
+
+Metabolomic data is under Data/
+
+# Manuscript
+
+[TBD]
